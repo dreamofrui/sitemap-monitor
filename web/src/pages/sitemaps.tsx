@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import Layout from '@/components/Layout'
-import { getFeeds, addFeed, deleteFeed, Feed } from '@/lib/supabase'
+import { Feed } from '@/lib/supabase'
 import { motion } from 'framer-motion'
 
 export default function SitemapsPage() {
@@ -8,11 +8,14 @@ export default function SitemapsPage() {
   const [loading, setLoading] = useState(true)
   const [newUrl, setNewUrl] = useState('')
   const [adding, setAdding] = useState(false)
+  const [scanningId, setScanningId] = useState<number | null>(null)
   const [error, setError] = useState('')
 
   async function loadFeeds() {
     try {
-      const data = await getFeeds()
+      const response = await fetch('/api/sources')
+      if (!response.ok) throw new Error((await response.json()).error || 'Failed to load sources')
+      const data = await response.json()
       setFeeds(data)
     } catch (error) {
       console.error('Error loading feeds:', error)
@@ -43,7 +46,12 @@ export default function SitemapsPage() {
 
     setAdding(true)
     try {
-      await addFeed(newUrl)
+      const response = await fetch('/api/sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: newUrl })
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Failed to add sitemap')
       setNewUrl('')
       await loadFeeds()
     } catch (error: any) {
@@ -53,15 +61,35 @@ export default function SitemapsPage() {
     }
   }
 
-  async function handleDeleteFeed(id: number) {
-    if (!confirm('Are you sure you want to delete this sitemap?')) return
-
+  async function handleToggleFeed(id: number, active: boolean) {
     try {
-      await deleteFeed(id)
+      const response = await fetch('/api/sources', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, active: !active })
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Failed to update sitemap')
       await loadFeeds()
     } catch (error) {
       console.error('Error deleting feed:', error)
       alert('Failed to delete sitemap')
+    }
+  }
+
+  async function handleScan(id: number) {
+    setScanningId(id)
+    try {
+      const response = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      })
+      if (!response.ok) throw new Error((await response.json()).error || 'Scan failed')
+      await loadFeeds()
+    } catch (error: any) {
+      setError(error.message || 'Scan failed')
+    } finally {
+      setScanningId(null)
     }
   }
 
@@ -163,7 +191,7 @@ export default function SitemapsPage() {
                   <div className="flex-1 min-w-0">
                     {/* Domain badge */}
                     <div className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-neon-cyan/20 to-neon-magenta/20 border border-neon-cyan/30 text-neon-cyan mb-3">
-                      🌐 {feed.domain}
+                      🌐 {feed.site || feed.domain}
                     </div>
 
                     {/* URL */}
@@ -174,10 +202,16 @@ export default function SitemapsPage() {
                     {/* Metadata */}
                     <div className="flex items-center space-x-6 text-xs text-gray-500 font-mono">
                       <span>
-                        ADDED: {new Date(feed.created_at).toLocaleDateString()}
+                        ADDED: {new Date(feed.createdAt || feed.created_at).toLocaleDateString()}
                       </span>
                       <span>
-                        UPDATED: {new Date(feed.updated_at).toLocaleDateString()}
+                        LAST SCAN: {feed.lastSuccessfulScanAt ? new Date(feed.lastSuccessfulScanAt).toLocaleString() : 'NEVER'}
+                      </span>
+                      <span className={feed.active ? 'text-green-400' : 'text-gray-600'}>
+                        {feed.active !== false ? 'ACTIVE' : 'PAUSED'}
+                      </span>
+                      <span>
+                        BASELINE: {feed.baselineEstablished ? 'READY' : 'PENDING'}
                       </span>
                     </div>
                   </div>
@@ -193,10 +227,17 @@ export default function SitemapsPage() {
                       VIEW
                     </a>
                     <button
-                      onClick={() => handleDeleteFeed(feed.id)}
+                      onClick={() => handleScan(feed.id)}
+                      disabled={feed.active === false || scanningId === feed.id}
+                      className="px-4 py-2 rounded-md text-sm font-semibold border border-gray-700 text-gray-400 hover:border-neon-cyan hover:text-neon-cyan transition-all duration-300 disabled:opacity-50"
+                    >
+                      {scanningId === feed.id ? 'SCANNING...' : 'SCAN'}
+                    </button>
+                    <button
+                      onClick={() => handleToggleFeed(feed.id, feed.active !== false)}
                       className="px-4 py-2 rounded-md text-sm font-semibold border border-gray-700 text-gray-400 hover:border-neon-magenta hover:text-neon-magenta hover:bg-neon-magenta/10 transition-all duration-300"
                     >
-                      DELETE
+                      {feed.active ? 'PAUSE' : 'REACTIVATE'}
                     </button>
                   </div>
                 </div>

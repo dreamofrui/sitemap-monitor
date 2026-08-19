@@ -3,7 +3,14 @@ import { createClient } from '@supabase/supabase-js'
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// Keep module evaluation safe during `next build`, where deployment secrets
+// are intentionally unavailable. Private writes and monitor reads go through
+// the authenticated server API; this client only supports the legacy public
+// read views that remain in the dashboard.
+export const supabase = createClient(
+  supabaseUrl || 'https://placeholder.supabase.co',
+  supabaseAnonKey || 'placeholder-anon-key'
+)
 
 export interface Game {
   id: number
@@ -30,6 +37,16 @@ export interface Feed {
   domain: string
   created_at: string
   updated_at: string
+  site?: string
+  active?: boolean
+  baselineEstablished?: boolean
+  baselineAt?: string | null
+  lastSuccessfulScanAt?: string | null
+  lastScanAt?: string | null
+  lastScanStatus?: string
+  lastError?: string | null
+  createdAt?: string
+  updatedAt?: string
 }
 
 export interface Stats {
@@ -122,35 +139,29 @@ export async function getGames(filters?: {
 }
 
 // 获取所有 feeds
-export async function getFeeds() {
-  const { data, error } = await supabase
-    .from('feeds')
-    .select('*')
-    .order('created_at', { ascending: false })
-
-  if (error) throw error
-  return data || []
+export async function getFeeds(): Promise<Feed[]> {
+  const response = await fetch('/api/sources')
+  if (!response.ok) throw new Error((await response.json()).error || 'Failed to load sources')
+  return (await response.json()) as Feed[]
 }
 
 // 添加 feed
-export async function addFeed(url: string) {
-  const domain = new URL(url).hostname
-  const { data, error } = await supabase
-    .from('feeds')
-    .insert({ url, domain })
-    .select()
-    .single()
-
-  if (error) throw error
-  return data
+export async function addFeed(url: string): Promise<Feed> {
+  const response = await fetch('/api/sources', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url })
+  })
+  if (!response.ok) throw new Error((await response.json()).error || 'Failed to add source')
+  return (await response.json()) as Feed
 }
 
 // 删除 feed
 export async function deleteFeed(id: number) {
-  const { error } = await supabase
-    .from('feeds')
-    .delete()
-    .eq('id', id)
-
-  if (error) throw error
+  const response = await fetch('/api/sources', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, active: false })
+  })
+  if (!response.ok) throw new Error((await response.json()).error || 'Failed to deactivate source')
 }

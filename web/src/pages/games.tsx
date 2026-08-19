@@ -18,7 +18,7 @@ export default function GamesPage() {
     async function loadDomains() {
       try {
         const feeds = await getFeeds()
-        const uniqueDomains = [...new Set(feeds.map((f: Feed) => f.domain))]
+        const uniqueDomains = [...new Set(feeds.map((f: Feed) => f.site || f.domain))]
         setDomains(uniqueDomains)
       } catch (error) {
         console.error('Error loading domains:', error)

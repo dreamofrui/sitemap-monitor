@@ -94,3 +94,125 @@ BEGIN
     RETURN deleted_count;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Hosted monitor runtime ---------------------------------------------------
+-- These tables are authoritative for Sitemap monitoring. The game tables
+-- above remain for backwards-compatible reads while existing data is retired.
+
+CREATE TABLE IF NOT EXISTS sitemap_sources (
+    id BIGSERIAL PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    site TEXT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    baseline_established BOOLEAN NOT NULL DEFAULT FALSE,
+    baseline_at TIMESTAMPTZ,
+    last_successful_scan_at TIMESTAMPTZ,
+    last_scan_at TIMESTAMPTZ,
+    last_scan_status TEXT NOT NULL DEFAULT 'never' CHECK (last_scan_status IN ('never', 'running', 'succeeded', 'failed')),
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS sitemap_snapshots (
+    source_id BIGINT PRIMARY KEY REFERENCES sitemap_sources(id) ON DELETE CASCADE,
+    urls JSONB NOT NULL,
+    documents JSONB NOT NULL DEFAULT '[]'::jsonb,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS scan_runs (
+    id BIGSERIAL PRIMARY KEY,
+    source_id BIGINT NOT NULL REFERENCES sitemap_sources(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    error TEXT,
+    new_url_count INTEGER NOT NULL DEFAULT 0,
+    baseline_created BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS discovered_urls (
+    id BIGSERIAL PRIMARY KEY,
+    source_id BIGINT NOT NULL REFERENCES sitemap_sources(id) ON DELETE CASCADE,
+    site TEXT NOT NULL,
+    url TEXT NOT NULL,
+    original_url TEXT,
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    UNIQUE(source_id, url)
+);
+
+ALTER TABLE discovered_urls ADD COLUMN IF NOT EXISTS original_url TEXT;
+
+CREATE TABLE IF NOT EXISTS term_occurrences (
+    id BIGSERIAL PRIMARY KEY,
+    discovery_id BIGINT NOT NULL UNIQUE REFERENCES discovered_urls(id) ON DELETE CASCADE,
+    source_id BIGINT NOT NULL REFERENCES sitemap_sources(id) ON DELETE CASCADE,
+    site TEXT NOT NULL,
+    url TEXT NOT NULL,
+    raw_segment TEXT NOT NULL,
+    phrase TEXT NOT NULL,
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS term_signals (
+    phrase TEXT PRIMARY KEY,
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    distinct_site_count INTEGER NOT NULL DEFAULT 0,
+    sites JSONB NOT NULL DEFAULT '[]'::jsonb,
+    priority BOOLEAN NOT NULL DEFAULT FALSE,
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sitemap_sources_active ON sitemap_sources(active);
+CREATE INDEX IF NOT EXISTS idx_sitemap_sources_site ON sitemap_sources(site);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_source ON scan_runs(source_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_urls_source ON discovered_urls(source_id, first_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_term_occurrences_phrase ON term_occurrences(phrase, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_term_signals_priority ON term_signals(priority DESC, distinct_site_count DESC, occurrence_count DESC);
+
+ALTER TABLE sitemap_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sitemap_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE scan_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE discovered_urls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE term_occurrences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE term_signals ENABLE ROW LEVEL SECURITY;
+
+-- Browser clients should only receive read models through the protected
+-- server-side Dashboard API. Service-role access bypasses these policies.
+CREATE POLICY "service access sitemap sources" ON sitemap_sources FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "service access sitemap snapshots" ON sitemap_snapshots FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "service access scan runs" ON scan_runs FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "service access discovered urls" ON discovered_urls FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "service access term occurrences" ON term_occurrences FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "service access term signals" ON term_signals FOR ALL USING (auth.role() = 'service_role');
+
+-- Rebuild a signal whenever an occurrence is added. Priority is historical:
+-- once two distinct sites have contributed, it never falls back to false.
+CREATE OR REPLACE FUNCTION update_term_signal() RETURNS TRIGGER AS $$
+DECLARE
+    sites_value JSONB;
+BEGIN
+    SELECT COALESCE(jsonb_agg(DISTINCT site ORDER BY site), '[]'::jsonb)
+      INTO sites_value FROM term_occurrences WHERE phrase = NEW.phrase;
+    INSERT INTO term_signals (phrase, occurrence_count, distinct_site_count, sites, priority, first_seen_at, last_seen_at)
+    SELECT NEW.phrase, COUNT(*), jsonb_array_length(sites_value), sites_value,
+           jsonb_array_length(sites_value) >= 2, MIN(first_seen_at), MAX(last_seen_at)
+      FROM term_occurrences WHERE phrase = NEW.phrase
+    ON CONFLICT (phrase) DO UPDATE SET
+      occurrence_count = EXCLUDED.occurrence_count,
+      distinct_site_count = EXCLUDED.distinct_site_count,
+      sites = EXCLUDED.sites,
+      priority = term_signals.priority OR EXCLUDED.priority,
+      first_seen_at = LEAST(term_signals.first_seen_at, EXCLUDED.first_seen_at),
+      last_seen_at = GREATEST(term_signals.last_seen_at, EXCLUDED.last_seen_at);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS term_occurrence_signal_trigger ON term_occurrences;
+CREATE TRIGGER term_occurrence_signal_trigger
+AFTER INSERT ON term_occurrences FOR EACH ROW EXECUTE FUNCTION update_term_signal();
