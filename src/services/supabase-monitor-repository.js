@@ -1,6 +1,13 @@
-import { canonicalizeUrl, extractPhrase } from './sitemap-monitor.js';
+import { canonicalizeUrl, extractPhrase, extractPhraseCandidate } from './sitemap-monitor.js';
 
 const sourceFields = 'id,url,site,active,baseline_established,baseline_at,last_successful_scan_at,last_scan_at,last_scan_status,last_error,created_at,updated_at';
+const WRITE_BATCH_SIZE = 500;
+
+function batches(values, size = WRITE_BATCH_SIZE) {
+  const result = [];
+  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
+  return result;
+}
 
 function sourceFromRow(row) {
   if (!row) return null;
@@ -17,6 +24,22 @@ function sourceFromRow(row) {
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function discoveryFromRow(row, sourceUrl) {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    sourceUrl: sourceUrl || null,
+    site: row.site,
+    canonicalUrl: row.url,
+    originalUrl: row.original_url || row.url,
+    rawSegment: row.raw_segment || null,
+    phrase: row.phrase || null,
+    excluded: Boolean(row.excluded),
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at
   };
 }
 
@@ -99,24 +122,79 @@ export class SupabaseMonitorRepository {
     return { id: data.id, sourceId: data.source_id, status: data.status, startedAt: data.started_at, completedAt: data.completed_at, error: data.error, newUrlCount: data.new_url_count || 0, baselineCreated: data.baseline_created || false };
   }
 
-  async recordDiscoveredUrls(source, urls, observedAt, { rawUrls = {} } = {}) {
+  async recordDiscoveredUrls(source, urls, observedAt, { rawUrls = {}, phraseOptions = {} } = {}) {
     if (!urls.length) return [];
-    const rows = urls.map((url) => ({ source_id: source.id, site: source.site, url: canonicalizeUrl(url), original_url: rawUrls[url] || url, first_seen_at: observedAt, last_seen_at: observedAt }));
-    const { data, error } = await this.client.from('discovered_urls').upsert(rows, { onConflict: 'source_id,url', ignoreDuplicates: true }).select('id,source_id,site,url,original_url,first_seen_at,last_seen_at');
-    if (error) throw error;
-    const discoveries = data || [];
+    const rows = urls.map((url) => {
+      const canonicalUrl = canonicalizeUrl(url);
+      const candidate = extractPhraseCandidate(canonicalUrl);
+      const phraseData = extractPhrase(canonicalUrl, phraseOptions);
+      return {
+        source_id: source.id,
+        site: source.site,
+        url: canonicalUrl,
+        original_url: rawUrls[canonicalUrl] ?? rawUrls[url] ?? url,
+        raw_segment: candidate?.rawSegment ?? null,
+        phrase: candidate?.phrase ?? null,
+        excluded: Boolean(candidate && !phraseData),
+        first_seen_at: observedAt,
+        last_seen_at: observedAt
+      };
+    });
+    const discoveries = [];
+    for (const batch of batches(rows)) {
+      const result = await this.client.rpc('upsert_discovered_url_batch', { entries: batch });
+      if (result.error) throw result.error;
+      discoveries.push(...(result.data || []));
+    }
     const occurrences = [];
     for (const discovery of discoveries) {
-      const phraseData = extractPhrase(discovery.url);
+      const phraseData = extractPhrase(discovery.url, phraseOptions);
       if (!phraseData) continue;
-      occurrences.push({ discovery_id: discovery.id, source_id: source.id, site: source.site, url: discovery.original_url || discovery.url, raw_segment: phraseData.rawSegment, phrase: phraseData.phrase, first_seen_at: observedAt, last_seen_at: observedAt });
+      occurrences.push({
+        discovery_id: discovery.id,
+        source_id: source.id,
+        site: source.site,
+        url: discovery.original_url || discovery.url,
+        canonical_url: discovery.url,
+        raw_segment: phraseData.rawSegment,
+        phrase: phraseData.phrase,
+        first_seen_at: discovery.first_seen_at || observedAt,
+        last_seen_at: observedAt
+      });
     }
-    if (occurrences.length) {
-      const occurrenceResult = await this.client.from('term_occurrences').upsert(occurrences, { onConflict: 'discovery_id' });
+    for (const batch of batches(occurrences)) {
+      const occurrenceResult = await this.client.from('term_occurrences').upsert(batch, { onConflict: 'discovery_id' });
       if (occurrenceResult.error) throw occurrenceResult.error;
       // The database trigger maintains cumulative counts and permanent priority.
     }
-    return discoveries;
+    return discoveries.map((row) => discoveryFromRow(row, source.url));
+  }
+
+  async listDiscoveredUrls(sourceId) {
+    return this.listDiscoveries({ sourceId });
+  }
+
+  async listRecentDiscoveredUrls(limit = 50) {
+    return this.listDiscoveries({ limit });
+  }
+
+  async listDiscoveries({ sourceId, limit } = {}) {
+    let query = this.client.from('discovered_urls')
+      .select('id,source_id,site,url,original_url,raw_segment,phrase,excluded,first_seen_at,last_seen_at')
+      .order('first_seen_at', { ascending: false });
+    if (sourceId != null) query = query.eq('source_id', sourceId);
+    if (limit != null) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = data || [];
+    if (!rows.length) return [];
+
+    const sourceIds = [...new Set(rows.map((row) => row.source_id))];
+    const sourceResult = await this.client.from('sitemap_sources').select('id,url').in('id', sourceIds);
+    if (sourceResult.error) throw sourceResult.error;
+    const sourceUrls = new Map((sourceResult.data || []).map((row) => [row.id, row.url]));
+
+    return rows.map((row) => discoveryFromRow(row, sourceUrls.get(row.source_id)));
   }
 
   async listSignals() {
@@ -124,9 +202,9 @@ export class SupabaseMonitorRepository {
     if (error) throw error;
     const signals = [];
     for (const row of data || []) {
-      const occurrencesResult = await this.client.from('term_occurrences').select('source_id,site,url,raw_segment,first_seen_at').eq('phrase', row.phrase).order('first_seen_at', { ascending: true });
+      const occurrencesResult = await this.client.from('term_occurrences').select('source_id,site,url,canonical_url,raw_segment,first_seen_at').eq('phrase', row.phrase).order('first_seen_at', { ascending: true });
       if (occurrencesResult.error) throw occurrencesResult.error;
-      signals.push({ phrase: row.phrase, occurrenceCount: row.occurrence_count, distinctSiteCount: row.distinct_site_count, priority: row.priority, firstSeenAt: row.first_seen_at, lastSeenAt: row.last_seen_at, sites: row.sites || [], occurrences: (occurrencesResult.data || []).map((occurrence) => ({ sourceId: occurrence.source_id, site: occurrence.site, url: occurrence.url, rawSegment: occurrence.raw_segment, firstSeenAt: occurrence.first_seen_at })) });
+      signals.push({ phrase: row.phrase, occurrenceCount: row.occurrence_count, distinctSiteCount: row.distinct_site_count, priority: row.priority, firstSeenAt: row.first_seen_at, lastSeenAt: row.last_seen_at, sites: row.sites || [], occurrences: (occurrencesResult.data || []).map((occurrence) => ({ sourceId: occurrence.source_id, site: occurrence.site, url: occurrence.url, canonicalUrl: occurrence.canonical_url || canonicalizeUrl(occurrence.url), rawSegment: occurrence.raw_segment, firstSeenAt: occurrence.first_seen_at })) });
     }
     return signals;
   }

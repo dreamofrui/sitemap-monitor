@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import Layout from '@/components/Layout'
 import StatCard from '@/components/StatCard'
 import GameCard from '@/components/GameCard'
-import { getStats, getGames, Game, Stats } from '@/lib/supabase'
+import RecentDiscoveries from '@/components/RecentDiscoveries'
+import { getStats, getGames, getRecentDiscoveries, Discovery, Game, Stats } from '@/lib/supabase'
 import { motion } from 'framer-motion'
 
 export default function Dashboard() {
@@ -13,22 +14,30 @@ export default function Dashboard() {
     highScoreGames: 0,
   })
   const [topGames, setTopGames] = useState<Game[]>([])
+  const [discoveries, setDiscoveries] = useState<Discovery[]>([])
+  const [discoveryError, setDiscoveryError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function loadData() {
-      try {
-        const [statsData, gamesData] = await Promise.all([
-          getStats(),
-          getGames({ minPlatforms: 2, limit: 6 }),
-        ])
-        setStats(statsData)
-        setTopGames(gamesData)
-      } catch (error) {
-        console.error('Error loading data:', error)
-      } finally {
-        setLoading(false)
+      const [statsResult, gamesResult, discoveriesResult] = await Promise.allSettled([
+        getStats(),
+        getGames({ minPlatforms: 2, limit: 6 }),
+        getRecentDiscoveries(20),
+      ])
+      if (statsResult.status === 'fulfilled') setStats(statsResult.value)
+      else console.error('Error loading stats:', statsResult.reason)
+      if (gamesResult.status === 'fulfilled') setTopGames(gamesResult.value)
+      else console.error('Error loading games:', gamesResult.reason)
+      if (discoveriesResult.status === 'fulfilled') setDiscoveries(discoveriesResult.value)
+      else {
+        const message = discoveriesResult.reason instanceof Error
+          ? discoveriesResult.reason.message
+          : 'Failed to load recent discoveries'
+        setDiscoveryError(message)
+        console.error('Error loading discoveries:', discoveriesResult.reason)
       }
+      setLoading(false)
     }
     loadData()
   }, [])
@@ -95,6 +104,8 @@ export default function Dashboard() {
           delay={0.3}
         />
       </div>
+
+      <RecentDiscoveries discoveries={discoveries} error={discoveryError} />
 
       {/* Top Cross-Platform Games */}
       <motion.div

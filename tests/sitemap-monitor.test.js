@@ -8,6 +8,7 @@ import {
   fetchSitemapTree
 } from '../src/services/sitemap-monitor.js';
 import { gzipSync } from 'node:zlib';
+import { SupabaseMonitorRepository } from '../src/services/supabase-monitor-repository.js';
 
 function sitemap(urls) {
   return `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls
@@ -25,6 +26,36 @@ function fetchFrom(responses) {
   };
 }
 
+function recordingSupabaseClient() {
+  const discoveries = new Map();
+  const calls = { rpcs: [], upserts: [] };
+  let nextId = 1;
+
+  return {
+    calls,
+    rpc(name, { entries }) {
+      calls.rpcs.push({ name, size: entries.length, entries });
+      for (const row of entries) {
+        const key = `${row.source_id}:${row.url}`;
+        if (!discoveries.has(key)) discoveries.set(key, { id: nextId++, ...row });
+      }
+      return Promise.resolve({
+        data: entries.map((row) => discoveries.get(`${row.source_id}:${row.url}`)),
+        error: null
+      });
+    },
+    from(table) {
+      return {
+        upsert(rows) {
+          const values = Array.isArray(rows) ? rows : [rows];
+          calls.upserts.push({ table, size: values.length, rows: values });
+          return Promise.resolve({ data: null, error: null });
+        }
+      };
+    }
+  };
+}
+
 test('canonicalizes hostnames and preserves query strings while removing fragments', () => {
   assert.equal(canonicalizeUrl('HTTPS://Example.COM/a/?q=1#section'), 'https://example.com/a?q=1');
   assert.equal(canonicalizeUrl('https://example.com/a/#section'), 'https://example.com/a');
@@ -34,6 +65,110 @@ test('extracts one complete phrase from the last path segment', () => {
   assert.deepEqual(extractPhrase('https://example.com/zh/tools/text-to-image?x=1'), {
     rawSegment: 'text-to-image',
     phrase: 'text to image'
+  });
+});
+
+test('decodes and normalizes case, separators, and whitespace as one phrase', () => {
+  assert.deepEqual(extractPhrase('https://example.com/tools/%20Text--TO__Image%20'), {
+    rawSegment: '%20Text--TO__Image%20',
+    phrase: 'text to image'
+  });
+});
+
+test('excludes navigation, metadata, and pagination candidates by default', () => {
+  assert.equal(extractPhrase('https://example.com/category/action-games'), null);
+  assert.equal(extractPhrase('https://example.com/sitemap.xml'), null);
+  assert.equal(extractPhrase('https://example.com/page/2'), null);
+  assert.equal(extractPhrase('https://example.com/page-3'), null);
+});
+
+test('supports configurable exclusions without discarding the discovered URL', async () => {
+  const sourceUrl = 'https://example.com/sitemap.xml';
+  const responses = { [sourceUrl]: sitemap(['https://example.com/old']) };
+  const repository = new InMemoryMonitorRepository();
+  const monitor = new SitemapMonitor({
+    repository,
+    fetchImpl: fetchFrom(responses),
+    phraseOptions: { exclusions: [/\/text_to_image$/i] }
+  });
+  const source = await monitor.addSource(sourceUrl);
+
+  await monitor.scanSource(source.id);
+  responses[sourceUrl] = sitemap(['https://example.com/old', 'https://example.com/text_to_image']);
+  await monitor.scanSource(source.id);
+
+  const discoveries = await repository.listRecentDiscoveredUrls();
+  assert.equal(discoveries.length, 1);
+  assert.equal(discoveries[0].sourceUrl, sourceUrl);
+  assert.equal(discoveries[0].site, 'example.com');
+  assert.equal(discoveries[0].canonicalUrl, 'https://example.com/text_to_image');
+  assert.equal(discoveries[0].originalUrl, 'https://example.com/text_to_image');
+  assert.equal(discoveries[0].rawSegment, 'text_to_image');
+  assert.equal(discoveries[0].phrase, 'text to image');
+  assert.equal(discoveries[0].excluded, true);
+  assert.ok(discoveries[0].firstSeenAt);
+  assert.deepEqual(await repository.listSignals(), []);
+});
+
+test('Supabase persistence batches large discovery sets and retains phrase evidence', async () => {
+  const client = recordingSupabaseClient();
+  const repository = new SupabaseMonitorRepository(client);
+  const source = { id: 7, site: 'example.com', url: 'https://example.com/sitemap.xml' };
+  const urls = Array.from({ length: 501 }, (_, index) => `https://example.com/text-to-image-${index}`);
+
+  const discoveries = await repository.recordDiscoveredUrls(source, urls, '2026-08-20T00:00:00.000Z');
+
+  assert.equal(discoveries.length, 501);
+  assert.deepEqual(
+    client.calls.rpcs.map((call) => call.size),
+    [500, 1]
+  );
+  assert.deepEqual(
+    client.calls.upserts.filter((call) => call.table === 'term_occurrences').map((call) => call.size),
+    [500, 1]
+  );
+  assert.ok(client.calls.rpcs.every((call) => call.size <= 500));
+  assert.deepEqual(client.calls.rpcs[0].entries[0], {
+    source_id: 7,
+    site: 'example.com',
+    url: 'https://example.com/text-to-image-0',
+    original_url: 'https://example.com/text-to-image-0',
+    raw_segment: 'text-to-image-0',
+    phrase: 'text to image 0',
+    excluded: false,
+    first_seen_at: '2026-08-20T00:00:00.000Z',
+    last_seen_at: '2026-08-20T00:00:00.000Z'
+  });
+});
+
+test('returns recent discoveries with source evidence and normalized phrases', async () => {
+  const sourceUrl = 'https://Example.com/sitemap.xml';
+  const responses = { [sourceUrl.toLowerCase()]: sitemap(['https://example.com/old']) };
+  const repository = new InMemoryMonitorRepository();
+  const monitor = new SitemapMonitor({ repository, fetchImpl: fetchFrom(responses) });
+  const source = await monitor.addSource(sourceUrl);
+
+  await monitor.scanSource(source.id);
+  responses[sourceUrl.toLowerCase()] = sitemap([
+    'https://example.com/old',
+    'https://Example.com/tools/text-to-image#evidence'
+  ]);
+  await monitor.scanSource(source.id);
+
+  const dashboard = await monitor.getDashboardData();
+  assert.equal(dashboard.recentDiscoveries.length, 1);
+  assert.deepEqual(dashboard.recentDiscoveries[0], {
+    id: 1,
+    sourceId: source.id,
+    sourceUrl: 'https://example.com/sitemap.xml',
+    site: 'example.com',
+    canonicalUrl: 'https://example.com/tools/text-to-image',
+    originalUrl: 'https://example.com/tools/text-to-image#evidence',
+    rawSegment: 'text-to-image',
+    phrase: 'text to image',
+    excluded: false,
+    firstSeenAt: dashboard.recentDiscoveries[0].firstSeenAt,
+    lastSeenAt: dashboard.recentDiscoveries[0].lastSeenAt
   });
 });
 

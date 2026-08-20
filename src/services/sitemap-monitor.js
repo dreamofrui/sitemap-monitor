@@ -261,15 +261,24 @@ export async function fetchSitemapTree(rootUrl, {
   return { urls: [...pageUrls], rawUrls: Object.fromEntries(rawUrls), documents };
 }
 
-const DEFAULT_EXCLUSIONS = [
+export const DEFAULT_EXCLUSIONS = [
   /(^|\/)(sitemap|robots|feed|rss|atom)(?:[./]|$)/i,
   /(^|\/)(about|contact|privacy|terms|faq|help|login|register)(?:\/|$)/i,
   /(^|\/)(tag|tags|category|categories|genre|genres|author|users?)(?:\/|$)/i,
+  /(^|\/)(?:page|p)(?:[-_]?\d+|\/\d+)(?:\/|$)/i,
   /\.(?:xml|json|txt|css|js|png|jpe?g|gif|ico|svg|webp)$/i
 ];
 
-/** Extracts a single, complete phrase from the final non-empty path segment. */
-export function extractPhrase(value, { exclusions = DEFAULT_EXCLUSIONS } = {}) {
+function matchesExclusion(pattern, pathname) {
+  if (typeof pattern === 'function') return Boolean(pattern(pathname));
+  if (pattern instanceof RegExp) {
+    pattern.lastIndex = 0;
+    return pattern.test(pathname);
+  }
+  return typeof pattern === 'string' && pathname.includes(pattern);
+}
+
+function phraseCandidate(value) {
   let parsed;
   try {
     parsed = new URL(value);
@@ -277,7 +286,7 @@ export function extractPhrase(value, { exclusions = DEFAULT_EXCLUSIONS } = {}) {
     return null;
   }
   const rawSegment = parsed.pathname.split('/').filter(Boolean).at(-1);
-  if (!rawSegment || exclusions.some((pattern) => pattern.test(parsed.pathname))) return null;
+  if (!rawSegment) return null;
   let decoded;
   try {
     decoded = decodeURIComponent(rawSegment);
@@ -290,11 +299,32 @@ export function extractPhrase(value, { exclusions = DEFAULT_EXCLUSIONS } = {}) {
     .trim()
     .toLowerCase();
   if (!phrase || phrase.length > 200) return null;
-  return { rawSegment, phrase };
+  return { pathname: parsed.pathname, rawSegment, phrase };
+}
+
+/** Extracts evidence before exclusions decide whether it becomes a signal. */
+export function extractPhraseCandidate(value) {
+  const candidate = phraseCandidate(value);
+  if (!candidate) return null;
+  const { pathname: _pathname, ...phraseData } = candidate;
+  return phraseData;
+}
+
+/** Extracts a signal-worthy complete phrase from the final path segment. */
+export function extractPhrase(value, { exclusions = DEFAULT_EXCLUSIONS } = {}) {
+  const candidate = phraseCandidate(value);
+  if (!candidate || exclusions.some((pattern) => matchesExclusion(pattern, candidate.pathname))) return null;
+  const { pathname: _pathname, ...phraseData } = candidate;
+  return phraseData;
 }
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function discoveredUrlView(record) {
+  const { url, ...view } = record;
+  return clone({ ...view, canonicalUrl: url });
 }
 
 /** A deterministic repository used by tests, local development, and dry runs. */
@@ -398,19 +428,26 @@ export class InMemoryMonitorRepository {
     return clone(run);
   }
 
-  async recordDiscoveredUrls(source, urls, observedAt, { rawUrls = {} } = {}) {
+  async recordDiscoveredUrls(source, urls, observedAt, { rawUrls = {}, phraseOptions = {} } = {}) {
     const sourceId = typeof source === 'object' ? source.id : Number(source);
     const sourceData = this.sources.get(sourceId);
+    if (!sourceData) throw new Error('Sitemap source not found');
     const inserted = [];
     for (const url of urls) {
       const canonicalUrl = canonicalizeUrl(url);
       const key = `${sourceId}:${canonicalUrl}`;
       if (this.discovered.has(key)) continue;
-      const originalUrl = rawUrls[canonicalUrl] || canonicalUrl;
-      const record = { id: this.nextDiscoveryId++, sourceId, site: sourceData.site, url: canonicalUrl, originalUrl, firstSeenAt: observedAt, lastSeenAt: observedAt };
+      const originalUrl = rawUrls[canonicalUrl] ?? rawUrls[url] ?? canonicalUrl;
+      const candidate = extractPhraseCandidate(canonicalUrl);
+      const phraseData = extractPhrase(canonicalUrl, phraseOptions);
+      const record = {
+        id: this.nextDiscoveryId++, sourceId, sourceUrl: sourceData.url, site: sourceData.site,
+        url: canonicalUrl, originalUrl, rawSegment: candidate?.rawSegment ?? null,
+        phrase: candidate?.phrase ?? null, excluded: Boolean(candidate && !phraseData),
+        firstSeenAt: observedAt, lastSeenAt: observedAt
+      };
       this.discovered.set(key, record);
       inserted.push(record);
-      const phraseData = extractPhrase(canonicalUrl);
       if (!phraseData) continue;
       const occurrence = { id: this.nextOccurrenceId++, discoveryId: record.id, sourceId, site: sourceData.site, url: originalUrl, canonicalUrl, rawSegment: phraseData.rawSegment, phrase: phraseData.phrase, firstSeenAt: observedAt, lastSeenAt: observedAt };
       this.occurrences.set(`${sourceId}:${canonicalUrl}`, occurrence);
@@ -427,11 +464,20 @@ export class InMemoryMonitorRepository {
       signal.occurrenceIds.push(occurrence.id);
       signal.occurrences.push({ sourceId: occurrence.sourceId, site: occurrence.site, url: occurrence.url, canonicalUrl: occurrence.canonicalUrl, rawSegment: occurrence.rawSegment, firstSeenAt: occurrence.firstSeenAt });
     }
-    return clone(inserted);
+    return inserted.map(discoveredUrlView);
   }
 
   async listDiscoveredUrls(sourceId) {
-    return [...this.discovered.values()].filter((entry) => entry.sourceId === Number(sourceId)).map(clone);
+    return [...this.discovered.values()]
+      .filter((entry) => entry.sourceId === Number(sourceId))
+      .map(discoveredUrlView);
+  }
+
+  async listRecentDiscoveredUrls(limit = 50) {
+    return [...this.discovered.values()]
+      .sort((a, b) => String(b.firstSeenAt).localeCompare(String(a.firstSeenAt)) || b.id - a.id)
+      .slice(0, limit)
+      .map(discoveredUrlView);
   }
 
   async listSignals() {
@@ -452,11 +498,12 @@ export class InMemoryMonitorRepository {
  */
 export class SitemapMonitor {
   /** @param {{repository: object, fetchImpl?: Function, fetchOptions?: object, clock?: Function}} options */
-  constructor({ repository, fetchImpl = globalThis.fetch, fetchOptions = {}, clock = () => new Date() } = {}) {
+  constructor({ repository, fetchImpl = globalThis.fetch, fetchOptions = {}, phraseOptions = {}, clock = () => new Date() } = {}) {
     if (!repository) throw new Error('A monitor repository is required');
     this.repository = repository;
     this.fetchImpl = fetchImpl;
     this.fetchOptions = fetchOptions;
+    this.phraseOptions = { ...phraseOptions };
     this.clock = clock;
   }
 
@@ -485,7 +532,10 @@ export class SitemapMonitor {
         await this.repository.completeScan(run.id, { baselineCreated: true, newUrlCount: 0 });
         return { source: await this.repository.getSource(source.id), run: await this.repository.listRuns(source.id).then((runs) => runs.at(-1)), baselineCreated: true, newUrls: [] };
       }
-      await this.repository.recordDiscoveredUrls(source, newUrls, observedAt, { rawUrls: current.rawUrls });
+      await this.repository.recordDiscoveredUrls(source, newUrls, observedAt, {
+        rawUrls: current.rawUrls,
+        phraseOptions: this.phraseOptions
+      });
       // Persist the accepted snapshot only after discovery evidence is durable.
       // A persistence failure must leave the previous snapshot available for retry.
       await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });
@@ -507,7 +557,16 @@ export class SitemapMonitor {
     return results;
   }
 
-  async getDashboardData() {
-    return { sources: await this.repository.listSources(), signals: await this.repository.listSignals() };
+  async listRecentDiscoveries(limit = 50) {
+    return this.repository.listRecentDiscoveredUrls(limit);
+  }
+
+  async getDashboardData({ discoveryLimit = 50 } = {}) {
+    const recentDiscoveries = await this.listRecentDiscoveries(discoveryLimit);
+    return {
+      sources: await this.repository.listSources(),
+      signals: await this.repository.listSignals(),
+      recentDiscoveries
+    };
   }
 }

@@ -136,14 +136,57 @@ CREATE TABLE IF NOT EXISTS discovered_urls (
     id BIGSERIAL PRIMARY KEY,
     source_id BIGINT NOT NULL REFERENCES sitemap_sources(id) ON DELETE CASCADE,
     site TEXT NOT NULL,
+    -- url is the canonical comparison URL; original_url preserves evidence.
     url TEXT NOT NULL,
     original_url TEXT,
+    raw_segment TEXT,
+    phrase TEXT,
+    excluded BOOLEAN NOT NULL DEFAULT FALSE,
     first_seen_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL,
     UNIQUE(source_id, url)
 );
 
 ALTER TABLE discovered_urls ADD COLUMN IF NOT EXISTS original_url TEXT;
+ALTER TABLE discovered_urls ADD COLUMN IF NOT EXISTS raw_segment TEXT;
+ALTER TABLE discovered_urls ADD COLUMN IF NOT EXISTS phrase TEXT;
+ALTER TABLE discovered_urls ADD COLUMN IF NOT EXISTS excluded BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- JSON input keeps large URL batches in the request body instead of a
+-- PostgREST `IN (...)` query string. Existing rows are returned on retry.
+CREATE OR REPLACE FUNCTION upsert_discovered_url_batch(entries JSONB)
+RETURNS SETOF discovered_urls AS $$
+BEGIN
+    INSERT INTO discovered_urls (
+        source_id, site, url, original_url, raw_segment, phrase, excluded,
+        first_seen_at, last_seen_at
+    )
+    SELECT entry.source_id, entry.site, entry.url, entry.original_url,
+           entry.raw_segment, entry.phrase, entry.excluded,
+           entry.first_seen_at, entry.last_seen_at
+    FROM jsonb_to_recordset(entries) AS entry(
+        source_id BIGINT,
+        site TEXT,
+        url TEXT,
+        original_url TEXT,
+        raw_segment TEXT,
+        phrase TEXT,
+        excluded BOOLEAN,
+        first_seen_at TIMESTAMPTZ,
+        last_seen_at TIMESTAMPTZ
+    )
+    ON CONFLICT (source_id, url) DO NOTHING;
+
+    RETURN QUERY
+    SELECT discovery.*
+    FROM discovered_urls AS discovery
+    JOIN jsonb_to_recordset(entries) AS entry(source_id BIGINT, url TEXT)
+      ON discovery.source_id = entry.source_id AND discovery.url = entry.url;
+END;
+$$ LANGUAGE plpgsql SET search_path = public;
+
+REVOKE ALL ON FUNCTION upsert_discovered_url_batch(JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION upsert_discovered_url_batch(JSONB) TO service_role;
 
 CREATE TABLE IF NOT EXISTS term_occurrences (
     id BIGSERIAL PRIMARY KEY,
@@ -151,11 +194,32 @@ CREATE TABLE IF NOT EXISTS term_occurrences (
     source_id BIGINT NOT NULL REFERENCES sitemap_sources(id) ON DELETE CASCADE,
     site TEXT NOT NULL,
     url TEXT NOT NULL,
+    -- Canonical comparison URL; url remains the original evidence URL.
+    canonical_url TEXT NOT NULL,
     raw_segment TEXT NOT NULL,
     phrase TEXT NOT NULL,
     first_seen_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE term_occurrences ADD COLUMN IF NOT EXISTS canonical_url TEXT;
+
+-- Upgrade databases created before canonical occurrence URLs and discovery
+-- phrase evidence were stored explicitly.
+UPDATE term_occurrences AS occurrence
+SET canonical_url = discovery.url
+FROM discovered_urls AS discovery
+WHERE occurrence.discovery_id = discovery.id
+  AND occurrence.canonical_url IS NULL;
+
+UPDATE discovered_urls AS discovery
+SET raw_segment = occurrence.raw_segment,
+    phrase = occurrence.phrase
+FROM term_occurrences AS occurrence
+WHERE occurrence.discovery_id = discovery.id
+  AND (discovery.raw_segment IS NULL OR discovery.phrase IS NULL);
+
+ALTER TABLE term_occurrences ALTER COLUMN canonical_url SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS term_signals (
     phrase TEXT PRIMARY KEY,

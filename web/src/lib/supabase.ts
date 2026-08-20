@@ -145,6 +145,20 @@ export async function getFeeds(): Promise<Feed[]> {
   return (await response.json()) as Feed[]
 }
 
+export interface Discovery {
+  id: number
+  sourceId: number
+  sourceUrl: string | null
+  site: string
+  canonicalUrl: string
+  originalUrl: string
+  rawSegment: string | null
+  phrase: string | null
+  excluded: boolean
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
 // 添加 feed
 export async function addFeed(url: string): Promise<Feed> {
   const response = await fetch('/api/sources', {
@@ -164,4 +178,10 @@ export async function deleteFeed(id: number) {
     body: JSON.stringify({ id, active: false })
   })
   if (!response.ok) throw new Error((await response.json()).error || 'Failed to deactivate source')
+}
+
+export async function getRecentDiscoveries(limit = 50): Promise<Discovery[]> {
+  const response = await fetch(`/api/discoveries?limit=${encodeURIComponent(limit)}`)
+  if (!response.ok) throw new Error((await response.json()).error || 'Failed to load discoveries')
+  return (await response.json()) as Discovery[]
 }
