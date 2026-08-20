@@ -56,6 +56,46 @@ function recordingSupabaseClient() {
   };
 }
 
+function signalReadingSupabaseClient() {
+  const updates = [];
+  const tables = {
+    term_signals: [{
+      phrase: 'text to image', occurrence_count: 2, distinct_site_count: 2,
+      priority: true, first_seen_at: '2026-08-20T01:00:00.000Z', last_seen_at: '2026-08-22T09:00:00.000Z',
+      sites: ['a.example', 'b.example']
+    }],
+    term_occurrences: [{
+      id: 12, discovery_id: 9, source_id: 7, site: 'a.example',
+      url: 'https://a.example/text-to-image', canonical_url: 'https://a.example/text-to-image',
+      raw_segment: 'text-to-image', first_seen_at: '2026-08-20T01:00:00.000Z', last_seen_at: '2026-08-22T09:00:00.000Z'
+    }, {
+      id: 13, discovery_id: 10, source_id: 8, site: 'b.example',
+      url: 'https://b.example/text_to_image', canonical_url: null,
+      raw_segment: 'text_to_image', first_seen_at: '2026-08-21T02:00:00.000Z', last_seen_at: null
+    }],
+    sitemap_sources: [{ id: 7, url: 'https://a.example/sitemap.xml' }, { id: 8, url: 'https://b.example/sitemap.xml' }]
+  };
+
+  function query(table) {
+    const result = { data: tables[table], error: null };
+    const builder = {
+      select: () => builder,
+      order: () => builder,
+      eq: () => builder,
+      lt: () => builder,
+      in: () => builder,
+      update: (values) => {
+        updates.push({ table, values });
+        return builder;
+      },
+      then: (resolve, reject) => Promise.resolve(result).then(resolve, reject)
+    };
+    return builder;
+  }
+
+  return { from: query, updates };
+}
+
 test('canonicalizes hostnames and preserves query strings while removing fragments', () => {
   assert.equal(canonicalizeUrl('HTTPS://Example.COM/a/?q=1#section'), 'https://example.com/a?q=1');
   assert.equal(canonicalizeUrl('https://example.com/a/#section'), 'https://example.com/a');
@@ -139,6 +179,28 @@ test('Supabase persistence batches large discovery sets and retains phrase evide
     first_seen_at: '2026-08-20T00:00:00.000Z',
     last_seen_at: '2026-08-20T00:00:00.000Z'
   });
+});
+
+test('Supabase signal read model includes source evidence and URL recency', async () => {
+  const client = signalReadingSupabaseClient();
+  const repository = new SupabaseMonitorRepository(client);
+  const signals = await repository.listSignals();
+
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].priority, true);
+  assert.deepEqual(signals[0].sites, ['a.example', 'b.example']);
+  assert.deepEqual(signals[0].occurrences.map((occurrence) => occurrence.sourceUrl), [
+    'https://a.example/sitemap.xml',
+    'https://b.example/sitemap.xml'
+  ]);
+  assert.equal(signals[0].occurrences[0].lastSeenAt, '2026-08-22T09:00:00.000Z');
+  assert.equal(signals[0].occurrences[1].lastSeenAt, signals[0].occurrences[1].firstSeenAt);
+
+  await repository.touchDiscoveredUrls({ id: 7 }, ['https://a.example/text-to-image'], '2026-08-22T09:00:00.000Z');
+  assert.deepEqual(client.updates, [
+    { table: 'discovered_urls', values: { last_seen_at: '2026-08-22T09:00:00.000Z' } },
+    { table: 'term_occurrences', values: { last_seen_at: '2026-08-22T09:00:00.000Z' } }
+  ]);
 });
 
 test('returns recent discoveries with source evidence and normalized phrases', async () => {
@@ -447,4 +509,82 @@ test('promotes a phrase after staggered discoveries on distinct hostnames', asyn
   assert.equal(signals[0].phrase, 'text to image');
   assert.equal(signals[0].distinctSiteCount, 2);
   assert.equal(signals[0].priority, true);
+});
+
+test('aggregates cross-site signals without counting baselines or repeated URLs twice', async () => {
+  const sourceUrls = {
+    parentA: 'https://example.com/sitemap-a.xml',
+    parentB: 'https://example.com/sitemap-b.xml',
+    child: 'https://shop.example.com/sitemap.xml',
+    other: 'https://other.example.com/sitemap.xml'
+  };
+  const responses = Object.fromEntries(Object.values(sourceUrls).map((url) => [url, sitemap(['https://example.com/existing-page'])]));
+
+  let now = new Date('2026-08-20T00:00:00.000Z');
+  const repository = new InMemoryMonitorRepository({ clock: () => now });
+  const monitor = new SitemapMonitor({ repository, fetchImpl: fetchFrom(responses), clock: () => now });
+  const sources = {};
+  for (const [name, url] of Object.entries(sourceUrls)) sources[name] = await monitor.addSource(url);
+
+  for (const source of Object.values(sources)) await monitor.scanSource(source.id);
+  assert.deepEqual(await repository.listSignals(), []);
+
+  now = new Date('2026-08-20T01:00:00.000Z');
+  responses[sourceUrls.parentA] = sitemap(['https://example.com/text-to-image', 'https://example.com/first-signal']);
+  await monitor.scanSource(sources.parentA.id);
+
+  now = new Date('2026-08-20T08:00:00.000Z');
+  responses[sourceUrls.parentB] = sitemap(['https://example.com/text-to-image', 'https://example.com/text_to_image?source=second']);
+  await monitor.scanSource(sources.parentB.id);
+
+  let signals = await repository.listSignals();
+  const ordinary = signals.find((signal) => signal.phrase === 'text to image');
+  assert.equal(ordinary.occurrenceCount, 3);
+  assert.equal(ordinary.distinctSiteCount, 1);
+  assert.equal(ordinary.priority, false);
+  assert.deepEqual(ordinary.sites, ['example.com']);
+  assert.equal(ordinary.occurrences[0].sourceUrl, sourceUrls.parentA);
+
+  now = new Date('2026-08-21T12:00:00.000Z');
+  responses[sourceUrls.child] = sitemap(['https://shop.example.com/text-to-image']);
+  await monitor.scanSource(sources.child.id);
+
+  signals = await repository.listSignals();
+  const promoted = signals.find((signal) => signal.phrase === 'text to image');
+  assert.equal(promoted.occurrenceCount, 4);
+  assert.equal(promoted.distinctSiteCount, 2);
+  assert.equal(promoted.priority, true);
+  assert.deepEqual(promoted.sites, ['example.com', 'shop.example.com']);
+  assert.equal(promoted.firstSeenAt, '2026-08-20T01:00:00.000Z');
+  assert.equal(promoted.lastSeenAt, '2026-08-21T12:00:00.000Z');
+
+  // A later scan touches evidence recency without creating a duplicate occurrence.
+  now = new Date('2026-08-22T09:00:00.000Z');
+  await monitor.scanSource(sources.child.id);
+  const refreshed = (await repository.listSignals()).find((signal) => signal.phrase === 'text to image');
+  assert.equal(refreshed.occurrenceCount, 4);
+  assert.equal(refreshed.lastSeenAt, '2026-08-22T09:00:00.000Z');
+  assert.equal((await repository.listDiscoveredUrls(sources.child.id))[0].lastSeenAt, '2026-08-22T09:00:00.000Z');
+  assert.equal(refreshed.occurrences.find((occurrence) => occurrence.sourceId === sources.child.id).lastSeenAt, '2026-08-22T09:00:00.000Z');
+});
+
+test('ranks signals by priority, distinct sites, occurrence volume, then recency', async () => {
+  const repository = new InMemoryMonitorRepository();
+  const monitor = new SitemapMonitor({ repository });
+  const sourceA = await monitor.addSource('https://a.example/sitemap.xml');
+  const sourceB = await monitor.addSource('https://b.example/sitemap.xml');
+  const sourceC = await monitor.addSource('https://c.example/sitemap.xml');
+  const sourceD = await monitor.addSource('https://d.example/sitemap.xml');
+
+  await repository.recordDiscoveredUrls(sourceA, ['https://a.example/ordinary'], '2026-08-20T01:00:00.000Z');
+  await repository.recordDiscoveredUrls(sourceA, ['https://a.example/high-volume?variant=1', 'https://a.example/high-volume?variant=2'], '2026-08-20T02:00:00.000Z');
+  await repository.recordDiscoveredUrls(sourceB, ['https://b.example/high-volume'], '2026-08-20T03:00:00.000Z');
+  await repository.recordDiscoveredUrls(sourceC, ['https://c.example/ordinary'], '2026-08-20T04:00:00.000Z');
+  await repository.recordDiscoveredUrls(sourceC, ['https://c.example/high-volume'], '2026-08-20T04:30:00.000Z');
+  await repository.recordDiscoveredUrls(sourceD, ['https://d.example/other-signal'], '2026-08-20T05:00:00.000Z');
+
+  const signals = await repository.listSignals();
+  assert.deepEqual(signals.map((signal) => signal.phrase), ['high volume', 'ordinary', 'other signal']);
+  assert.equal(signals[0].priority, true);
+  assert.equal(signals[0].distinctSiteCount, 3);
 });

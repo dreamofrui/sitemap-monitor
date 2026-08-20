@@ -159,6 +159,28 @@ export interface Discovery {
   lastSeenAt: string
 }
 
+export interface SignalOccurrence {
+  sourceId: number
+  sourceUrl: string | null
+  site: string
+  url: string
+  canonicalUrl: string
+  rawSegment: string
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+export interface DemandSignal {
+  phrase: string
+  occurrenceCount: number
+  distinctSiteCount: number
+  priority: boolean
+  firstSeenAt: string
+  lastSeenAt: string
+  sites: string[]
+  occurrences: SignalOccurrence[]
+}
+
 // 添加 feed
 export async function addFeed(url: string): Promise<Feed> {
   const response = await fetch('/api/sources', {
@@ -184,4 +206,10 @@ export async function getRecentDiscoveries(limit = 50): Promise<Discovery[]> {
   const response = await fetch(`/api/discoveries?limit=${encodeURIComponent(limit)}`)
   if (!response.ok) throw new Error((await response.json()).error || 'Failed to load discoveries')
   return (await response.json()) as Discovery[]
+}
+
+export async function getSignals(): Promise<DemandSignal[]> {
+  const response = await fetch('/api/signals')
+  if (!response.ok) throw new Error((await response.json()).error || 'Failed to load demand signals')
+  return (await response.json()) as DemandSignal[]
 }

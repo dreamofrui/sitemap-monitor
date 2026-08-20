@@ -3,7 +3,8 @@ import Layout from '@/components/Layout'
 import StatCard from '@/components/StatCard'
 import GameCard from '@/components/GameCard'
 import RecentDiscoveries from '@/components/RecentDiscoveries'
-import { getStats, getGames, getRecentDiscoveries, Discovery, Game, Stats } from '@/lib/supabase'
+import DemandSignals from '@/components/DemandSignals'
+import { getStats, getGames, getRecentDiscoveries, getSignals, DemandSignal, Discovery, Game, Stats } from '@/lib/supabase'
 import { motion } from 'framer-motion'
 
 export default function Dashboard() {
@@ -16,14 +17,17 @@ export default function Dashboard() {
   const [topGames, setTopGames] = useState<Game[]>([])
   const [discoveries, setDiscoveries] = useState<Discovery[]>([])
   const [discoveryError, setDiscoveryError] = useState('')
+  const [signals, setSignals] = useState<DemandSignal[]>([])
+  const [signalError, setSignalError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function loadData() {
-      const [statsResult, gamesResult, discoveriesResult] = await Promise.allSettled([
+      const [statsResult, gamesResult, discoveriesResult, signalsResult] = await Promise.allSettled([
         getStats(),
         getGames({ minPlatforms: 2, limit: 6 }),
         getRecentDiscoveries(20),
+        getSignals(),
       ])
       if (statsResult.status === 'fulfilled') setStats(statsResult.value)
       else console.error('Error loading stats:', statsResult.reason)
@@ -36,6 +40,14 @@ export default function Dashboard() {
           : 'Failed to load recent discoveries'
         setDiscoveryError(message)
         console.error('Error loading discoveries:', discoveriesResult.reason)
+      }
+      if (signalsResult.status === 'fulfilled') setSignals(signalsResult.value)
+      else {
+        const message = signalsResult.reason instanceof Error
+          ? signalsResult.reason.message
+          : 'Failed to load demand signals'
+        setSignalError(message)
+        console.error('Error loading demand signals:', signalsResult.reason)
       }
       setLoading(false)
     }
@@ -104,6 +116,8 @@ export default function Dashboard() {
           delay={0.3}
         />
       </div>
+
+      <DemandSignals signals={signals} error={signalError} />
 
       <RecentDiscoveries discoveries={discoveries} error={discoveryError} />
 

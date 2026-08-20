@@ -279,4 +279,5 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS term_occurrence_signal_trigger ON term_occurrences;
 CREATE TRIGGER term_occurrence_signal_trigger
-AFTER INSERT ON term_occurrences FOR EACH ROW EXECUTE FUNCTION update_term_signal();
+AFTER INSERT OR UPDATE OF last_seen_at ON term_occurrences
+FOR EACH ROW EXECUTE FUNCTION update_term_signal();

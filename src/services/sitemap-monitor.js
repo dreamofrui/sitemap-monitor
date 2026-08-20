@@ -449,7 +449,19 @@ export class InMemoryMonitorRepository {
       this.discovered.set(key, record);
       inserted.push(record);
       if (!phraseData) continue;
-      const occurrence = { id: this.nextOccurrenceId++, discoveryId: record.id, sourceId, site: sourceData.site, url: originalUrl, canonicalUrl, rawSegment: phraseData.rawSegment, phrase: phraseData.phrase, firstSeenAt: observedAt, lastSeenAt: observedAt };
+      const occurrence = {
+        id: this.nextOccurrenceId++,
+        discoveryId: record.id,
+        sourceId,
+        sourceUrl: sourceData.url,
+        site: sourceData.site,
+        url: originalUrl,
+        canonicalUrl,
+        rawSegment: phraseData.rawSegment,
+        phrase: phraseData.phrase,
+        firstSeenAt: observedAt,
+        lastSeenAt: observedAt
+      };
       this.occurrences.set(`${sourceId}:${canonicalUrl}`, occurrence);
       let signal = this.signals.get(phraseData.phrase);
       if (!signal) {
@@ -460,9 +472,23 @@ export class InMemoryMonitorRepository {
       signal.sites.add(sourceData.site);
       signal.distinctSiteCount = signal.sites.size;
       signal.priority = signal.priority || signal.distinctSiteCount >= 2;
-      signal.lastSeenAt = observedAt;
+      signal.firstSeenAt = String(observedAt).localeCompare(String(signal.firstSeenAt)) < 0
+        ? observedAt
+        : signal.firstSeenAt;
+      signal.lastSeenAt = String(observedAt).localeCompare(String(signal.lastSeenAt)) > 0
+        ? observedAt
+        : signal.lastSeenAt;
       signal.occurrenceIds.push(occurrence.id);
-      signal.occurrences.push({ sourceId: occurrence.sourceId, site: occurrence.site, url: occurrence.url, canonicalUrl: occurrence.canonicalUrl, rawSegment: occurrence.rawSegment, firstSeenAt: occurrence.firstSeenAt });
+      signal.occurrences.push({
+        sourceId: occurrence.sourceId,
+        sourceUrl: occurrence.sourceUrl,
+        site: occurrence.site,
+        url: occurrence.url,
+        canonicalUrl: occurrence.canonicalUrl,
+        rawSegment: occurrence.rawSegment,
+        firstSeenAt: occurrence.firstSeenAt,
+        lastSeenAt: occurrence.lastSeenAt
+      });
     }
     return inserted.map(discoveredUrlView);
   }
@@ -480,9 +506,34 @@ export class InMemoryMonitorRepository {
       .map(discoveredUrlView);
   }
 
+  async touchDiscoveredUrls(source, urls, observedAt) {
+    const sourceId = typeof source === 'object' ? source.id : Number(source);
+    for (const url of urls) {
+      const canonicalUrl = canonicalizeUrl(url);
+      const record = this.discovered.get(`${sourceId}:${canonicalUrl}`);
+      if (!record) continue;
+      if (String(observedAt).localeCompare(String(record.lastSeenAt)) > 0) record.lastSeenAt = observedAt;
+      const occurrence = this.occurrences.get(`${sourceId}:${canonicalUrl}`);
+      if (occurrence && String(observedAt).localeCompare(String(occurrence.lastSeenAt)) > 0) {
+        occurrence.lastSeenAt = observedAt;
+        const signal = this.signals.get(occurrence.phrase);
+        if (signal) {
+          if (String(observedAt).localeCompare(String(signal.lastSeenAt)) > 0) signal.lastSeenAt = observedAt;
+          const evidence = signal.occurrences.find((entry) => entry.sourceId === occurrence.sourceId && entry.canonicalUrl === occurrence.canonicalUrl);
+          if (evidence) evidence.lastSeenAt = observedAt;
+        }
+      }
+    }
+  }
+
   async listSignals() {
     return [...this.signals.values()]
-      .map((signal) => ({ ...signal, sites: [...signal.sites], occurrenceIds: [...signal.occurrenceIds], occurrences: [...signal.occurrences] }))
+      .map((signal) => ({
+        ...signal,
+        sites: [...signal.sites].sort(),
+        occurrenceIds: [...signal.occurrenceIds],
+        occurrences: [...signal.occurrences].sort((a, b) => String(a.firstSeenAt).localeCompare(String(b.firstSeenAt)) || a.sourceId - b.sourceId || a.canonicalUrl.localeCompare(b.canonicalUrl))
+      }))
       .sort((a, b) => Number(b.priority) - Number(a.priority) || b.distinctSiteCount - a.distinctSiteCount || b.occurrenceCount - a.occurrenceCount || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)))
       .map(clone);
   }
@@ -536,6 +587,9 @@ export class SitemapMonitor {
         rawUrls: current.rawUrls,
         phraseOptions: this.phraseOptions
       });
+      if (typeof this.repository.touchDiscoveredUrls === 'function') {
+        await this.repository.touchDiscoveredUrls(source, current.urls, observedAt);
+      }
       // Persist the accepted snapshot only after discovery evidence is durable.
       // A persistence failure must leave the previous snapshot available for retry.
       await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });

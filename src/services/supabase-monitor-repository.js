@@ -178,6 +178,25 @@ export class SupabaseMonitorRepository {
     return this.listDiscoveries({ limit });
   }
 
+  async touchDiscoveredUrls(source, urls, observedAt) {
+    const canonicalUrls = [...new Set(urls.map((url) => canonicalizeUrl(url)))];
+    for (const batch of batches(canonicalUrls)) {
+      const discoveryResult = await this.client.from('discovered_urls')
+        .update({ last_seen_at: observedAt })
+        .eq('source_id', source.id)
+        .lt('last_seen_at', observedAt)
+        .in('url', batch);
+      if (discoveryResult.error) throw discoveryResult.error;
+
+      const occurrenceResult = await this.client.from('term_occurrences')
+        .update({ last_seen_at: observedAt })
+        .eq('source_id', source.id)
+        .lt('last_seen_at', observedAt)
+        .in('canonical_url', batch);
+      if (occurrenceResult.error) throw occurrenceResult.error;
+    }
+  }
+
   async listDiscoveries({ sourceId, limit } = {}) {
     let query = this.client.from('discovered_urls')
       .select('id,source_id,site,url,original_url,raw_segment,phrase,excluded,first_seen_at,last_seen_at')
@@ -202,9 +221,34 @@ export class SupabaseMonitorRepository {
     if (error) throw error;
     const signals = [];
     for (const row of data || []) {
-      const occurrencesResult = await this.client.from('term_occurrences').select('source_id,site,url,canonical_url,raw_segment,first_seen_at').eq('phrase', row.phrase).order('first_seen_at', { ascending: true });
+      const occurrencesResult = await this.client.from('term_occurrences').select('source_id,site,url,canonical_url,raw_segment,first_seen_at,last_seen_at').eq('phrase', row.phrase).order('first_seen_at', { ascending: true });
       if (occurrencesResult.error) throw occurrencesResult.error;
-      signals.push({ phrase: row.phrase, occurrenceCount: row.occurrence_count, distinctSiteCount: row.distinct_site_count, priority: row.priority, firstSeenAt: row.first_seen_at, lastSeenAt: row.last_seen_at, sites: row.sites || [], occurrences: (occurrencesResult.data || []).map((occurrence) => ({ sourceId: occurrence.source_id, site: occurrence.site, url: occurrence.url, canonicalUrl: occurrence.canonical_url || canonicalizeUrl(occurrence.url), rawSegment: occurrence.raw_segment, firstSeenAt: occurrence.first_seen_at })) });
+      const sourceIds = [...new Set((occurrencesResult.data || []).map((occurrence) => occurrence.source_id))];
+      const sourceUrls = new Map();
+      if (sourceIds.length) {
+        const sourcesResult = await this.client.from('sitemap_sources').select('id,url').in('id', sourceIds);
+        if (sourcesResult.error) throw sourcesResult.error;
+        for (const source of sourcesResult.data || []) sourceUrls.set(source.id, source.url);
+      }
+      signals.push({
+        phrase: row.phrase,
+        occurrenceCount: row.occurrence_count,
+        distinctSiteCount: row.distinct_site_count,
+        priority: row.priority,
+        firstSeenAt: row.first_seen_at,
+        lastSeenAt: row.last_seen_at,
+        sites: Array.isArray(row.sites) ? row.sites : [],
+        occurrences: (occurrencesResult.data || []).map((occurrence) => ({
+          sourceId: occurrence.source_id,
+          sourceUrl: sourceUrls.get(occurrence.source_id) || null,
+          site: occurrence.site,
+          url: occurrence.url,
+          canonicalUrl: occurrence.canonical_url || canonicalizeUrl(occurrence.url),
+          rawSegment: occurrence.raw_segment,
+          firstSeenAt: occurrence.first_seen_at,
+          lastSeenAt: occurrence.last_seen_at || occurrence.first_seen_at
+        }))
+      });
     }
     return signals;
   }
