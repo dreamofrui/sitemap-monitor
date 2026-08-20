@@ -2,6 +2,7 @@ import { gunzipSync } from 'node:zlib';
 
 const DEFAULT_MAX_DEPTH = 8;
 const DEFAULT_MAX_DOCUMENTS = 1_000;
+const DEFAULT_MAX_URLS = 100_000;
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 
 /**
@@ -37,7 +38,7 @@ function decodeXml(value) {
 
 function extractLocations(xml) {
   const locations = [];
-  const locationPattern = /<loc(?:\s[^>]*)?>([\s\S]*?)<\/loc>/gi;
+  const locationPattern = /<(?:[\w.-]+:)?loc(?:\s[^>]*)?>([\s\S]*?)<\/(?:[\w.-]+:)?loc>/gi;
   let match;
   while ((match = locationPattern.exec(xml))) {
     const rawLocation = match[1].trim().replace(/^<!\[CDATA\[([\s\S]*)\]\]>$/, '$1').trim();
@@ -47,12 +48,50 @@ function extractLocations(xml) {
   return locations;
 }
 
+function validateXmlStructure(xml) {
+  const tokenPattern = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/?[A-Za-z_][\w:.-]*(?:\s+[^<>]*?)?\/?>/g;
+  const stack = [];
+  let rootName = null;
+  let rootClosed = false;
+  let cursor = 0;
+  let match;
+
+  while ((match = tokenPattern.exec(xml))) {
+    const text = xml.slice(cursor, match.index);
+    if (text.includes('<') || ((!stack.length && !rootName) || rootClosed) && text.trim()) return null;
+    const token = match[0];
+    cursor = tokenPattern.lastIndex;
+    if (token.startsWith('<!--') || token.startsWith('<![CDATA[') || token.startsWith('<?')) continue;
+
+    const closing = /^<\//.test(token);
+    const selfClosing = /\/\s*>$/.test(token);
+    const name = token.match(/^<\/?([A-Za-z_][\w:.-]*)/)?.[1];
+    if (!name) return null;
+
+    if (closing) {
+      if (stack.pop() !== name) return null;
+      if (!stack.length) rootClosed = true;
+      continue;
+    }
+    if (rootClosed) return null;
+    if (!rootName) rootName = name;
+    else if (!stack.length) return null;
+    if (!selfClosing) stack.push(name);
+    else if (!stack.length) rootClosed = true;
+  }
+
+  const trailingText = xml.slice(cursor);
+  if (trailingText.includes('<') || (rootClosed && trailingText.trim()) || stack.length || !rootName || !rootClosed) return null;
+  return rootName;
+}
+
 function parseSitemapDocument(xml, url) {
   if (typeof xml !== 'string' || !xml.trim()) {
     throw new Error(`Empty sitemap document: ${url}`);
   }
-  const root = /<(urlset|sitemapindex)(?:\s[^>]*)?>/i.exec(xml)?.[1]?.toLowerCase();
-  if (!root || !new RegExp(`<\\/${root}\\s*>`, 'i').test(xml)) {
+  const rootTag = validateXmlStructure(xml);
+  const root = rootTag?.split(':').at(-1).toLowerCase();
+  if (!root || !['urlset', 'sitemapindex'].includes(root)) {
     throw new Error(`Malformed sitemap XML: ${url}`);
   }
   const locations = extractLocations(xml);
@@ -61,15 +100,53 @@ function parseSitemapDocument(xml, url) {
 }
 
 async function readResponseBody(response, url, maxBytes) {
-  if (!response || response.ok === false) {
+  if (!response || response.ok === false || (Number.isFinite(response.status) && response.status >= 400)) {
     const status = response?.status ?? 'unknown';
     throw new Error(`Sitemap fetch failed (${status}): ${url}`);
   }
-  const body = response.arrayBuffer ? await response.arrayBuffer() : Buffer.from(await response.text());
+  const declaredLengthHeader = response.headers?.get?.('content-length');
+  const declaredLength = declaredLengthHeader == null ? Number.NaN : Number(declaredLengthHeader);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error(`Sitemap exceeds size limit: ${url}`);
+  }
+  let body;
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          throw new Error(`Sitemap exceeds size limit: ${url}`);
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    body = Buffer.concat(chunks, total);
+  } else if (response.arrayBuffer) {
+    body = Buffer.from(await response.arrayBuffer());
+  } else {
+    body = Buffer.from(await response.text());
+  }
   if (body.byteLength > maxBytes) throw new Error(`Sitemap exceeds size limit: ${url}`);
   let bytes = Buffer.from(body);
   const contentEncoding = response.headers?.get?.('content-encoding')?.toLowerCase();
-  if (contentEncoding?.includes('gzip') || /\.gz(?:$|[?#])/i.test(url)) {
+  const isGzipPayload = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  const hasGzipEncoding = contentEncoding?.includes('gzip');
+  if (Number.isFinite(declaredLength) && declaredLength >= 0 && declaredLength !== bytes.byteLength && !isGzipPayload && !hasGzipEncoding) {
+    throw new Error(`Sitemap truncated response: ${url}`);
+  }
+  // Fetch implementations may transparently decode Content-Encoding: gzip,
+  // leaving the header in place. Only gunzip when the body still has the gzip
+  // magic bytes, or when a .gz URL explicitly lacks a content-encoding header.
+  if (isGzipPayload || (/\.gz(?:$|[?#])/i.test(url) && !hasGzipEncoding)) {
     try {
       bytes = gunzipSync(bytes);
     } catch (error) {
@@ -78,6 +155,29 @@ async function readResponseBody(response, url, maxBytes) {
   }
   if (bytes.byteLength > maxBytes) throw new Error(`Sitemap exceeds size limit: ${url}`);
   return bytes.toString('utf8');
+}
+
+async function runWithTimeout(operation, url, timeoutMs, controller) {
+  const request = Promise.resolve().then(operation);
+  if (!(timeoutMs > 0)) return request;
+
+  let timer;
+  let timedOut = false;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller?.abort();
+      reject(new Error(`Sitemap fetch timed out: ${url}`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } catch (error) {
+    if (timedOut) throw new Error(`Sitemap fetch timed out: ${url}`, { cause: error });
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -89,6 +189,7 @@ export async function fetchSitemapTree(rootUrl, {
   fetchImpl = globalThis.fetch,
   maxDepth = DEFAULT_MAX_DEPTH,
   maxDocuments = DEFAULT_MAX_DOCUMENTS,
+  maxUrls = DEFAULT_MAX_URLS,
   maxBytes = DEFAULT_MAX_BYTES,
   timeoutMs = 30_000,
   userAgent = 'sitemap-monitor/1.0'
@@ -96,26 +197,35 @@ export async function fetchSitemapTree(rootUrl, {
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required');
   const root = canonicalizeUrl(rootUrl);
   const visited = new Set();
+  const active = new Set();
   const pageUrls = new Set();
   const rawUrls = new Map();
   const documents = [];
 
   async function visit(documentUrl, depth) {
     const canonicalDocumentUrl = canonicalizeUrl(documentUrl);
+    if (active.has(canonicalDocumentUrl)) {
+      throw new Error(`Sitemap recursion cycle detected: ${canonicalDocumentUrl}`);
+    }
     if (visited.has(canonicalDocumentUrl)) return;
     if (depth > maxDepth) throw new Error(`Sitemap nesting exceeds depth limit: ${canonicalDocumentUrl}`);
     if (visited.size >= maxDocuments) throw new Error('Sitemap document limit exceeded');
     visited.add(canonicalDocumentUrl);
+    active.add(canonicalDocumentUrl);
 
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const response = await fetchImpl(canonicalDocumentUrl, {
+      const requestOptions = {
         method: 'GET',
         headers: { accept: 'application/xml,text/xml;q=0.9,*/*;q=0.1', 'user-agent': userAgent },
         ...(controller ? { signal: controller.signal } : {})
-      });
-      const xml = await readResponseBody(response, canonicalDocumentUrl, maxBytes);
+      };
+      const xml = await runWithTimeout(
+        async () => readResponseBody(await fetchImpl(canonicalDocumentUrl, requestOptions), canonicalDocumentUrl, maxBytes),
+        canonicalDocumentUrl,
+        timeoutMs,
+        controller
+      );
       const parsed = parseSitemapDocument(xml, canonicalDocumentUrl);
       documents.push({ url: canonicalDocumentUrl, type: parsed.type });
       if (parsed.type === 'index') {
@@ -124,19 +234,25 @@ export async function fetchSitemapTree(rootUrl, {
         }
       } else {
         for (const page of parsed.locations) {
+          let resolvedUrl;
+          let canonicalPageUrl;
           try {
-            const resolvedUrl = new URL(page, canonicalDocumentUrl).toString();
-            const canonicalPageUrl = canonicalizeUrl(resolvedUrl);
-            pageUrls.add(canonicalPageUrl);
-            if (!rawUrls.has(canonicalPageUrl)) rawUrls.set(canonicalPageUrl, resolvedUrl);
+            resolvedUrl = new URL(page, canonicalDocumentUrl).toString();
+            canonicalPageUrl = canonicalizeUrl(resolvedUrl);
           } catch {
             // Invalid loc entries are ignored, but a document with no valid
             // pages is still rejected below rather than replacing a baseline.
+            continue;
           }
+          if (!pageUrls.has(canonicalPageUrl) && pageUrls.size >= maxUrls) {
+            throw new Error(`Sitemap URL limit exceeded (${maxUrls})`);
+          }
+          pageUrls.add(canonicalPageUrl);
+          if (!rawUrls.has(canonicalPageUrl)) rawUrls.set(canonicalPageUrl, resolvedUrl);
         }
       }
     } finally {
-      if (timer) clearTimeout(timer);
+      active.delete(canonicalDocumentUrl);
     }
   }
 
@@ -358,18 +474,21 @@ export class SitemapMonitor {
     try {
       const current = await fetchSitemapTree(source.url, { fetchImpl: this.fetchImpl, ...this.fetchOptions });
       const previous = await this.repository.getSnapshot(source.id);
-      if (previous?.urls?.length && current.urls.length < previous.urls.length * 0.5) {
+      if (previous?.urls?.length && current.urls.length <= previous.urls.length * 0.5) {
         throw new Error(`Suspicious sitemap size decrease: ${current.urls.length} (previously ${previous.urls.length})`);
       }
       const previousUrls = new Set(previous?.urls || []);
       const newUrls = previous ? current.urls.filter((url) => !previousUrls.has(url)) : [];
       const observedAt = this.clock().toISOString();
-      await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });
       if (!previous) {
+        await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });
         await this.repository.completeScan(run.id, { baselineCreated: true, newUrlCount: 0 });
         return { source: await this.repository.getSource(source.id), run: await this.repository.listRuns(source.id).then((runs) => runs.at(-1)), baselineCreated: true, newUrls: [] };
       }
       await this.repository.recordDiscoveredUrls(source, newUrls, observedAt, { rawUrls: current.rawUrls });
+      // Persist the accepted snapshot only after discovery evidence is durable.
+      // A persistence failure must leave the previous snapshot available for retry.
+      await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });
       await this.repository.completeScan(run.id, { baselineCreated: false, newUrlCount: newUrls.length });
       return { source: await this.repository.getSource(source.id), run: await this.repository.listRuns(source.id).then((runs) => runs.at(-1)), baselineCreated: false, newUrls };
     } catch (error) {

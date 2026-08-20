@@ -51,6 +51,137 @@ test('recursively resolves indexes, deduplicates children, and supports gzip doc
   assert.equal(result.documents.length, 3);
 });
 
+test('supports gzip payloads advertised by the response headers', async () => {
+  const root = 'https://example.com/sitemap.xml';
+  const compressed = gzipSync(Buffer.from(sitemap(['https://example.com/header-gzip'])));
+  const result = await fetchSitemapTree(root, {
+    fetchImpl: fetchFrom({
+      [root]: new Response(compressed, { headers: { 'content-encoding': 'gzip' } })
+    })
+  });
+  assert.deepEqual(result.urls, ['https://example.com/header-gzip']);
+});
+
+test('accepts gzip responses already transparently decoded by fetch', async () => {
+  const root = 'https://example.com/sitemap.xml';
+  const body = sitemap(['https://example.com/decoded-gzip']);
+  const compressedLength = gzipSync(Buffer.from(body)).byteLength;
+  const result = await fetchSitemapTree(root, {
+    fetchImpl: fetchFrom({
+      [root]: new Response(body, {
+        headers: {
+          'content-encoding': 'gzip',
+          'content-length': String(compressedLength)
+        }
+      })
+    })
+  });
+  assert.deepEqual(result.urls, ['https://example.com/decoded-gzip']);
+});
+
+test('rejects a response whose declared body length is truncated', async () => {
+  const root = 'https://example.com/sitemap.xml';
+  const body = sitemap(['https://example.com/length-check']);
+  await assert.rejects(
+    () => fetchSitemapTree(root, {
+      fetchImpl: fetchFrom({
+        [root]: new Response(body, {
+          headers: { 'content-type': 'application/xml', 'content-length': String(body.length + 20) }
+        })
+      })
+    }),
+    /truncated response/
+  );
+});
+
+test('rejects malformed XML and empty sitemap results', async () => {
+  const malformed = 'https://example.com/malformed.xml';
+  const empty = 'https://example.com/empty.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(malformed, {
+      fetchImpl: fetchFrom({ [malformed]: '<urlset><url><loc>https://example.com/page</loc></urlset>' })
+    }),
+    /Malformed sitemap XML/
+  );
+  await assert.rejects(
+    () => fetchSitemapTree(empty, {
+      fetchImpl: fetchFrom({ [empty]: '<?xml version="1.0"?><urlset></urlset>' })
+    }),
+    /did not contain any page URLs/
+  );
+});
+
+test('reports HTTP, byte, and nesting safety failures', async () => {
+  const httpError = 'https://example.com/http-error.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(httpError, { fetchImpl: fetchFrom({ [httpError]: new Response('unavailable', { status: 503 }) }) }),
+    /fetch failed \(503\)/
+  );
+
+  const oversized = 'https://example.com/oversized.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(oversized, { maxBytes: 10, fetchImpl: fetchFrom({ [oversized]: sitemap(['https://example.com/page']) }) }),
+    /exceeds size limit/
+  );
+
+  const root = 'https://example.com/depth-root.xml';
+  const child = 'https://example.com/depth-child.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(root, {
+      maxDepth: 0,
+      fetchImpl: fetchFrom({
+        [root]: '<?xml version="1.0"?><sitemapindex><sitemap><loc>depth-child.xml</loc></sitemap></sitemapindex>',
+        [child]: sitemap(['https://example.com/page'])
+      })
+    }),
+    /nesting exceeds depth limit/
+  );
+
+  await assert.rejects(
+    () => fetchSitemapTree(root, {
+      maxDocuments: 1,
+      fetchImpl: fetchFrom({
+        [root]: '<?xml version="1.0"?><sitemapindex><sitemap><loc>depth-child.xml</loc></sitemap></sitemapindex>',
+        [child]: sitemap(['https://example.com/page'])
+      })
+    }),
+    /document limit exceeded/
+  );
+});
+
+test('reports recursive sitemap cycles instead of silently accepting a partial tree', async () => {
+  const root = 'https://example.com/root.xml';
+  const child = 'https://example.com/child.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(root, {
+      fetchImpl: fetchFrom({
+        [root]: '<?xml version="1.0"?><sitemapindex><sitemap><loc>child.xml</loc></sitemap></sitemapindex>',
+        [child]: `<?xml version="1.0"?><sitemapindex><sitemap><loc>${root}</loc></sitemap></sitemapindex>`
+      })
+    }),
+    /cycle detected/
+  );
+});
+
+test('bounds the number of unique page URLs collected from a sitemap tree', async () => {
+  const root = 'https://example.com/sitemap.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(root, {
+      maxUrls: 1,
+      fetchImpl: fetchFrom({ [root]: sitemap(['https://example.com/one', 'https://example.com/two']) })
+    }),
+    /URL limit exceeded/
+  );
+});
+
+test('enforces fetch timeouts even when a fetch implementation ignores AbortSignal', async () => {
+  const root = 'https://example.com/sitemap.xml';
+  await assert.rejects(
+    () => fetchSitemapTree(root, { timeoutMs: 10, fetchImpl: async () => new Promise(() => {}) }),
+    /timed out/
+  );
+});
+
 test('keeps two sources on one hostname isolated and creates independent baselines', async () => {
   const first = 'https://example.com/sitemap-a.xml';
   const second = 'https://example.com/sitemap-b.xml';
@@ -93,6 +224,53 @@ test('reports only later additions and preserves the accepted snapshot after fai
   const current = await monitor.getSource(source.id);
   assert.equal(current.lastError, 'temporary outage');
   assert.ok(current.lastSuccessfulScanAt);
+});
+
+test('rejects suspiciously truncated snapshots and preserves the accepted snapshot', async () => {
+  const sourceUrl = 'https://example.com/sitemap.xml';
+  const responses = {
+    [sourceUrl]: sitemap(['https://example.com/one', 'https://example.com/two', 'https://example.com/three', 'https://example.com/four'])
+  };
+  const repository = new InMemoryMonitorRepository();
+  const monitor = new SitemapMonitor({ repository, fetchImpl: fetchFrom(responses) });
+  const source = await monitor.addSource(sourceUrl);
+
+  await monitor.scanSource(source.id);
+  responses[sourceUrl] = sitemap(['https://example.com/one', 'https://example.com/two']);
+  await assert.rejects(() => monitor.scanSource(source.id), /Suspicious sitemap size decrease/);
+  assert.deepEqual((await repository.getSnapshot(source.id)).urls, [
+    'https://example.com/one',
+    'https://example.com/two',
+    'https://example.com/three',
+    'https://example.com/four'
+  ]);
+});
+
+test('does not advance a snapshot when discovery persistence fails', async () => {
+  class FailingDiscoveryRepository extends InMemoryMonitorRepository {
+    failDiscovery = false;
+
+    async recordDiscoveredUrls(...args) {
+      if (this.failDiscovery) throw new Error('discovery write failed');
+      return super.recordDiscoveredUrls(...args);
+    }
+  }
+
+  const sourceUrl = 'https://example.com/sitemap.xml';
+  const responses = { [sourceUrl]: sitemap(['https://example.com/one']) };
+  const repository = new FailingDiscoveryRepository();
+  const monitor = new SitemapMonitor({ repository, fetchImpl: fetchFrom(responses) });
+  const source = await monitor.addSource(sourceUrl);
+
+  await monitor.scanSource(source.id);
+  responses[sourceUrl] = sitemap(['https://example.com/one', 'https://example.com/two']);
+  repository.failDiscovery = true;
+  await assert.rejects(() => monitor.scanSource(source.id), /discovery write failed/);
+  assert.deepEqual((await repository.getSnapshot(source.id)).urls, ['https://example.com/one']);
+
+  repository.failDiscovery = false;
+  const retry = await monitor.scanSource(source.id);
+  assert.deepEqual(retry.newUrls, ['https://example.com/two']);
 });
 
 test('deactivation pauses scans and reactivation retains history', async () => {

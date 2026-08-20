@@ -88,6 +88,8 @@ export default function SitemapsPage() {
       await loadFeeds()
     } catch (error: any) {
       setError(error.message || 'Scan failed')
+      // Refresh source health after a failed scan so the persisted error is visible.
+      await loadFeeds()
     } finally {
       setScanningId(null)
     }
@@ -200,12 +202,15 @@ export default function SitemapsPage() {
                     </p>
 
                     {/* Metadata */}
-                    <div className="flex items-center space-x-6 text-xs text-gray-500 font-mono">
+                    <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-gray-500 font-mono">
                       <span>
                         ADDED: {new Date(feed.createdAt || feed.created_at).toLocaleDateString()}
                       </span>
                       <span>
                         LAST SCAN: {feed.lastSuccessfulScanAt ? new Date(feed.lastSuccessfulScanAt).toLocaleString() : 'NEVER'}
+                      </span>
+                      <span className={feed.lastScanStatus === 'failed' ? 'text-neon-magenta' : feed.lastScanStatus === 'succeeded' ? 'text-green-400' : 'text-gray-500'}>
+                        HEALTH: {(feed.lastScanStatus || 'never').toUpperCase()}
                       </span>
                       <span className={feed.active ? 'text-green-400' : 'text-gray-600'}>
                         {feed.active !== false ? 'ACTIVE' : 'PAUSED'}
@@ -214,6 +219,11 @@ export default function SitemapsPage() {
                         BASELINE: {feed.baselineEstablished ? 'READY' : 'PENDING'}
                       </span>
                     </div>
+                    {feed.lastError && (
+                      <p className="mt-2 text-xs text-neon-magenta font-mono break-words">
+                        LAST ERROR: {feed.lastError}
+                      </p>
+                    )}
                   </div>
 
                   {/* Actions */}
