@@ -21,8 +21,8 @@ ALTER TABLE sitemaps ENABLE ROW LEVEL SECURITY;
 
 -- 5. 创建公开读取策略
 DROP POLICY IF EXISTS "Allow public read on sitemaps" ON sitemaps;
-CREATE POLICY "Allow public read on sitemaps" ON sitemaps FOR SELECT USING (true);
+DROP POLICY IF EXISTS "service access sitemaps" ON sitemaps;
+CREATE POLICY "service access sitemaps" ON sitemaps FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
 
 -- 6. 创建服务端写入策略
 DROP POLICY IF EXISTS "Allow service write on sitemaps" ON sitemaps;
-CREATE POLICY "Allow service write on sitemaps" ON sitemaps FOR ALL USING (true) WITH CHECK (true);

@@ -1,34 +1,34 @@
 import { useEffect, useState } from 'react'
 import Layout from '@/components/Layout'
-import { Feed } from '@/lib/supabase'
+import { SitemapSource } from '@/lib/supabase'
 import { motion } from 'framer-motion'
 
 export default function SitemapsPage() {
-  const [feeds, setFeeds] = useState<Feed[]>([])
+  const [sources, setSources] = useState<SitemapSource[]>([])
   const [loading, setLoading] = useState(true)
   const [newUrl, setNewUrl] = useState('')
   const [adding, setAdding] = useState(false)
   const [scanningId, setScanningId] = useState<number | null>(null)
   const [error, setError] = useState('')
 
-  async function loadFeeds() {
+  async function loadSources() {
     try {
       const response = await fetch('/api/sources')
       if (!response.ok) throw new Error((await response.json()).error || 'Failed to load sources')
       const data = await response.json()
-      setFeeds(data)
+      setSources(data)
     } catch (error) {
-      console.error('Error loading feeds:', error)
+      console.error('Error loading sources:', error)
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    loadFeeds()
+    loadSources()
   }, [])
 
-  async function handleAddFeed(e: React.FormEvent) {
+  async function handleAddSource(e: React.FormEvent) {
     e.preventDefault()
     setError('')
 
@@ -53,7 +53,7 @@ export default function SitemapsPage() {
       })
       if (!response.ok) throw new Error((await response.json()).error || 'Failed to add sitemap')
       setNewUrl('')
-      await loadFeeds()
+      await loadSources()
     } catch (error: any) {
       setError(error.message || 'Failed to add sitemap')
     } finally {
@@ -61,7 +61,7 @@ export default function SitemapsPage() {
     }
   }
 
-  async function handleToggleFeed(id: number, active: boolean) {
+  async function handleToggleSource(id: number, active: boolean) {
     try {
       const response = await fetch('/api/sources', {
         method: 'PATCH',
@@ -69,9 +69,9 @@ export default function SitemapsPage() {
         body: JSON.stringify({ id, active: !active })
       })
       if (!response.ok) throw new Error((await response.json()).error || 'Failed to update sitemap')
-      await loadFeeds()
+      await loadSources()
     } catch (error) {
-      console.error('Error deleting feed:', error)
+      console.error('Error updating source:', error)
       alert('Failed to delete sitemap')
     }
   }
@@ -85,11 +85,11 @@ export default function SitemapsPage() {
         body: JSON.stringify({ id })
       })
       if (!response.ok) throw new Error((await response.json()).error || 'Scan failed')
-      await loadFeeds()
+      await loadSources()
     } catch (error: any) {
       setError(error.message || 'Scan failed')
       // Refresh source health after a failed scan so the persisted error is visible.
-      await loadFeeds()
+      await loadSources()
     } finally {
       setScanningId(null)
     }
@@ -122,7 +122,7 @@ export default function SitemapsPage() {
           <span className="text-white">MANAGEMENT</span>
         </h1>
         <p className="text-gray-400 font-mono text-lg">
-          {feeds.length} SITEMAPS CONFIGURED // MANAGE YOUR DATA SOURCES
+          {sources.length} SITEMAPS CONFIGURED // MANAGE YOUR DATA SOURCES
         </p>
       </motion.div>
 
@@ -136,7 +136,7 @@ export default function SitemapsPage() {
         <h2 className="text-xl font-bold text-neon-cyan mb-4 uppercase tracking-wider">
           Add New Sitemap
         </h2>
-        <form onSubmit={handleAddFeed} className="flex gap-4">
+        <form onSubmit={handleAddSource} className="flex gap-4">
           <input
             type="text"
             placeholder="https://example.com/sitemap.xml"
@@ -170,7 +170,7 @@ export default function SitemapsPage() {
           <span className="text-neon-cyan">CONFIGURED</span> SITEMAPS
         </h2>
 
-        {feeds.length === 0 ? (
+        {sources.length === 0 ? (
           <div className="card-cyber p-12 text-center">
             <p className="text-gray-500 text-lg font-mono">
               NO SITEMAPS CONFIGURED
@@ -181,9 +181,9 @@ export default function SitemapsPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4">
-            {feeds.map((feed, index) => (
+            {sources.map((source, index) => (
               <motion.div
-                key={feed.id}
+                key={source.id}
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ duration: 0.3, delay: index * 0.05 }}
@@ -193,35 +193,35 @@ export default function SitemapsPage() {
                   <div className="flex-1 min-w-0">
                     {/* Domain badge */}
                     <div className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-neon-cyan/20 to-neon-magenta/20 border border-neon-cyan/30 text-neon-cyan mb-3">
-                      🌐 {feed.site || feed.domain}
+                      🌐 {source.site || source.domain}
                     </div>
 
                     {/* URL */}
                     <p className="text-sm text-gray-300 font-mono break-all mb-3 group-hover:text-neon-cyan transition-colors">
-                      {feed.url}
+                      {source.url}
                     </p>
 
                     {/* Metadata */}
                     <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-gray-500 font-mono">
                       <span>
-                        ADDED: {new Date(feed.createdAt || feed.created_at).toLocaleDateString()}
+                        ADDED: {new Date(source.createdAt || source.created_at).toLocaleDateString()}
                       </span>
                       <span>
-                        LAST SCAN: {feed.lastSuccessfulScanAt ? new Date(feed.lastSuccessfulScanAt).toLocaleString() : 'NEVER'}
+                        LAST SCAN: {source.lastSuccessfulScanAt ? new Date(source.lastSuccessfulScanAt).toLocaleString() : 'NEVER'}
                       </span>
-                      <span className={feed.lastScanStatus === 'failed' ? 'text-neon-magenta' : feed.lastScanStatus === 'succeeded' ? 'text-green-400' : 'text-gray-500'}>
-                        HEALTH: {(feed.lastScanStatus || 'never').toUpperCase()}
+                      <span className={source.lastScanStatus === 'failed' ? 'text-neon-magenta' : source.lastScanStatus === 'succeeded' ? 'text-green-400' : 'text-gray-500'}>
+                        HEALTH: {(source.lastScanStatus || 'never').toUpperCase()}
                       </span>
-                      <span className={feed.active ? 'text-green-400' : 'text-gray-600'}>
-                        {feed.active !== false ? 'ACTIVE' : 'PAUSED'}
+                      <span className={source.active ? 'text-green-400' : 'text-gray-600'}>
+                        {source.active !== false ? 'ACTIVE' : 'PAUSED'}
                       </span>
                       <span>
-                        BASELINE: {feed.baselineEstablished ? 'READY' : 'PENDING'}
+                        BASELINE: {source.baselineEstablished ? 'READY' : 'PENDING'}
                       </span>
                     </div>
-                    {feed.lastError && (
+                    {source.lastError && (
                       <p className="mt-2 text-xs text-neon-magenta font-mono break-words">
-                        LAST ERROR: {feed.lastError}
+                        LAST ERROR: {source.lastError}
                       </p>
                     )}
                   </div>
@@ -229,7 +229,7 @@ export default function SitemapsPage() {
                   {/* Actions */}
                   <div className="ml-6 flex items-center space-x-3">
                     <a
-                      href={feed.url}
+                      href={source.url}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="px-4 py-2 rounded-md text-sm font-semibold border border-gray-700 text-gray-400 hover:border-neon-cyan hover:text-neon-cyan transition-all duration-300"
@@ -237,17 +237,17 @@ export default function SitemapsPage() {
                       VIEW
                     </a>
                     <button
-                      onClick={() => handleScan(feed.id)}
-                      disabled={feed.active === false || scanningId === feed.id}
+                      onClick={() => handleScan(source.id)}
+                      disabled={source.active === false || scanningId === source.id}
                       className="px-4 py-2 rounded-md text-sm font-semibold border border-gray-700 text-gray-400 hover:border-neon-cyan hover:text-neon-cyan transition-all duration-300 disabled:opacity-50"
                     >
-                      {scanningId === feed.id ? 'SCANNING...' : 'SCAN'}
+                      {scanningId === source.id ? 'SCANNING...' : 'SCAN'}
                     </button>
                     <button
-                      onClick={() => handleToggleFeed(feed.id, feed.active !== false)}
+                      onClick={() => handleToggleSource(source.id, source.active !== false)}
                       className="px-4 py-2 rounded-md text-sm font-semibold border border-gray-700 text-gray-400 hover:border-neon-magenta hover:text-neon-magenta hover:bg-neon-magenta/10 transition-all duration-300"
                     >
-                      {feed.active ? 'PAUSE' : 'REACTIVATE'}
+                      {source.active ? 'PAUSE' : 'REACTIVATE'}
                     </button>
                   </div>
                 </div>

@@ -1,53 +1,43 @@
-import crypto from 'node:crypto'
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { createClient } from '@supabase/supabase-js'
 import { SitemapMonitor } from '../../../src/services/sitemap-monitor.js'
 import { SupabaseMonitorRepository } from '../../../src/services/supabase-monitor-repository.js'
+import { createSessionToken, isValidSessionToken, SESSION_COOKIE_NAME } from './session.ts'
 
-const COOKIE_NAME = 'sitemap_monitor_session'
-
-function secret() {
-  return process.env.DASHBOARD_SESSION_SECRET || process.env.DASHBOARD_PASSWORD || ''
-}
-
-function sessionToken() {
-  const configuredPassword = process.env.DASHBOARD_PASSWORD
-  if (!configuredPassword || !secret()) return ''
-  return crypto.createHmac('sha256', secret()).update(configuredPassword).digest('hex')
-}
-
-export function isAuthenticated(req: NextApiRequest) {
+export async function isAuthenticated(req: NextApiRequest) {
   const cookies = req.headers.cookie?.split(';').map((part) => part.trim()) || []
-  const value = cookies.find((cookie) => cookie.startsWith(`${COOKIE_NAME}=`))?.slice(COOKIE_NAME.length + 1)
-  const expected = sessionToken()
-  if (!value || !expected) return false
-  const actualBytes = Buffer.from(value)
-  const expectedBytes = Buffer.from(expected)
-  return actualBytes.length === expectedBytes.length && crypto.timingSafeEqual(actualBytes, expectedBytes)
+  const value = cookies
+    .find((cookie) => cookie.startsWith(`${SESSION_COOKIE_NAME}=`))
+    ?.slice(SESSION_COOKIE_NAME.length + 1)
+  return isValidSessionToken(value)
 }
 
-export function setSessionCookie(res: NextApiResponse) {
-  const token = sessionToken()
+export async function setSessionCookie(res: NextApiResponse) {
+  const token = await createSessionToken()
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`)
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`)
 }
 
 export function clearSessionCookie(res: NextApiResponse) {
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`)
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`)
 }
 
-export function requireAuth(req: NextApiRequest, res: NextApiResponse) {
-  if (isAuthenticated(req)) return true
+export async function requireAuth(req: NextApiRequest, res: NextApiResponse) {
+  if (await isAuthenticated(req)) return true
   res.status(401).json({ error: 'Authentication required' })
   return false
 }
 
-export function createMonitor() {
+export function createServerClient() {
   const url = process.env.SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_KEY
   if (!url || !key) throw new Error('Server Supabase credentials are not configured')
-  const client = createClient(url, key)
-  return new SitemapMonitor({ repository: new SupabaseMonitorRepository(client) })
+  return createClient(url, key)
+}
+
+export function createMonitor() {
+  return new SitemapMonitor({ repository: new SupabaseMonitorRepository(createServerClient()) })
 }
 
 export function handleError(res: NextApiResponse, error: unknown) {

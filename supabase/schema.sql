@@ -69,18 +69,13 @@ ALTER TABLE game_sources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE update_logs ENABLE ROW LEVEL SECURITY;
 
 -- 公开读取策略
-CREATE POLICY "Allow public read on feeds" ON feeds FOR SELECT USING (true);
-CREATE POLICY "Allow public read on sitemaps" ON sitemaps FOR SELECT USING (true);
-CREATE POLICY "Allow public read on games" ON games FOR SELECT USING (true);
-CREATE POLICY "Allow public read on game_sources" ON game_sources FOR SELECT USING (true);
-CREATE POLICY "Allow public read on update_logs" ON update_logs FOR SELECT USING (true);
+CREATE POLICY "service access feeds" ON feeds FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access sitemaps" ON sitemaps FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access games" ON games FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access game sources" ON game_sources FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access update logs" ON update_logs FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
 
 -- 服务端写入策略
-CREATE POLICY "Allow service write on feeds" ON feeds FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow service write on sitemaps" ON sitemaps FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow service write on games" ON games FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow service write on game_sources" ON game_sources FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow service write on update_logs" ON update_logs FOR ALL USING (true) WITH CHECK (true);
 
 -- 清理旧日志的函数
 CREATE OR REPLACE FUNCTION clean_old_logs(days_to_keep INTEGER DEFAULT 30)

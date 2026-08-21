@@ -4,7 +4,8 @@ import StatCard from '@/components/StatCard'
 import GameCard from '@/components/GameCard'
 import RecentDiscoveries from '@/components/RecentDiscoveries'
 import DemandSignals from '@/components/DemandSignals'
-import { getStats, getGames, getRecentDiscoveries, getSignals, DemandSignal, Discovery, Game, Stats } from '@/lib/supabase'
+import SourceStatus from '@/components/SourceStatus'
+import { getStats, getGames, getSources, getRecentDiscoveries, getSignals, DemandSignal, Discovery, SitemapSource, Game, Stats } from '@/lib/supabase'
 import { motion } from 'framer-motion'
 
 export default function Dashboard() {
@@ -15,6 +16,8 @@ export default function Dashboard() {
     highScoreGames: 0,
   })
   const [topGames, setTopGames] = useState<Game[]>([])
+  const [sources, setSources] = useState<SitemapSource[]>([])
+  const [sourceError, setSourceError] = useState('')
   const [discoveries, setDiscoveries] = useState<Discovery[]>([])
   const [discoveryError, setDiscoveryError] = useState('')
   const [signals, setSignals] = useState<DemandSignal[]>([])
@@ -23,9 +26,10 @@ export default function Dashboard() {
 
   useEffect(() => {
     async function loadData() {
-      const [statsResult, gamesResult, discoveriesResult, signalsResult] = await Promise.allSettled([
+      const [statsResult, gamesResult, sourcesResult, discoveriesResult, signalsResult] = await Promise.allSettled([
         getStats(),
         getGames({ minPlatforms: 2, limit: 6 }),
+        getSources(),
         getRecentDiscoveries(20),
         getSignals(),
       ])
@@ -33,6 +37,14 @@ export default function Dashboard() {
       else console.error('Error loading stats:', statsResult.reason)
       if (gamesResult.status === 'fulfilled') setTopGames(gamesResult.value)
       else console.error('Error loading games:', gamesResult.reason)
+      if (sourcesResult.status === 'fulfilled') setSources(sourcesResult.value)
+      else {
+        const message = sourcesResult.reason instanceof Error
+          ? sourcesResult.reason.message
+          : 'Failed to load sources'
+        setSourceError(message)
+        console.error('Error loading sources:', sourcesResult.reason)
+      }
       if (discoveriesResult.status === 'fulfilled') setDiscoveries(discoveriesResult.value)
       else {
         const message = discoveriesResult.reason instanceof Error
@@ -116,6 +128,8 @@ export default function Dashboard() {
           delay={0.3}
         />
       </div>
+
+      <SourceStatus sources={sources} error={sourceError} />
 
       <DemandSignals signals={signals} error={signalError} />
 

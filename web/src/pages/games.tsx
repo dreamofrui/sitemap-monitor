@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import Layout from '@/components/Layout'
 import GameCard from '@/components/GameCard'
-import { getGames, getFeeds, Game, Feed } from '@/lib/supabase'
+import { getGames, getSources, Game, SitemapSource } from '@/lib/supabase'
 import { motion } from 'framer-motion'
 
 export default function GamesPage() {
@@ -17,8 +17,8 @@ export default function GamesPage() {
   useEffect(() => {
     async function loadDomains() {
       try {
-        const feeds = await getFeeds()
-        const uniqueDomains = [...new Set(feeds.map((f: Feed) => f.site || f.domain))]
+        const sources = await getSources()
+        const uniqueDomains = [...new Set(sources.map((source: SitemapSource) => source.site || source.domain))]
         setDomains(uniqueDomains)
       } catch (error) {
         console.error('Error loading domains:', error)

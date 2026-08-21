@@ -58,23 +58,28 @@ CREATE INDEX idx_game_sources_domain ON game_sources(domain);
 CREATE INDEX idx_game_sources_url ON game_sources(url);
 
 -- 6. 重新设置 RLS 策略
+ALTER TABLE feeds ENABLE ROW LEVEL SECURITY;
 ALTER TABLE update_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE games ENABLE ROW LEVEL SECURITY;
 ALTER TABLE game_sources ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Allow public read on feeds" ON feeds;
+DROP POLICY IF EXISTS "Allow service write on feeds" ON feeds;
+DROP POLICY IF EXISTS "service access feeds" ON feeds;
 DROP POLICY IF EXISTS "Allow public read on update_logs" ON update_logs;
 DROP POLICY IF EXISTS "Allow public read on games" ON games;
 DROP POLICY IF EXISTS "Allow public read on game_sources" ON game_sources;
 DROP POLICY IF EXISTS "Allow service write on update_logs" ON update_logs;
 DROP POLICY IF EXISTS "Allow service write on games" ON games;
 DROP POLICY IF EXISTS "Allow service write on game_sources" ON game_sources;
+DROP POLICY IF EXISTS "service access update logs" ON update_logs;
+DROP POLICY IF EXISTS "service access games" ON games;
+DROP POLICY IF EXISTS "service access game sources" ON game_sources;
 
-CREATE POLICY "Allow public read on update_logs" ON update_logs FOR SELECT USING (true);
-CREATE POLICY "Allow public read on games" ON games FOR SELECT USING (true);
-CREATE POLICY "Allow public read on game_sources" ON game_sources FOR SELECT USING (true);
-CREATE POLICY "Allow service write on update_logs" ON update_logs FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow service write on games" ON games FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow service write on game_sources" ON game_sources FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "service access feeds" ON feeds FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access update logs" ON update_logs FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access games" ON games FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
+CREATE POLICY "service access game sources" ON game_sources FOR ALL USING (auth.role() = 'service_role') WITH CHECK (auth.role() = 'service_role');
 
 -- 完成！
 SELECT 'Migration completed successfully!' as status;

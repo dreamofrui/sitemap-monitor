@@ -1,8 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { createMonitor, handleError, requireAuth } from '../../server/monitor'
+import { createMonitor, handleError, requireAuth } from '../../server/monitor.ts'
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (!requireAuth(req, res)) return
+  if (!(await requireAuth(req, res))) return
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' })
   try {
     const requestedLimit = Number(req.query.limit || 50)
