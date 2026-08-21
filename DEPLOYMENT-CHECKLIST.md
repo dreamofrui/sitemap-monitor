@@ -1,122 +1,74 @@
-# ✅ 部署检查清单
+# Hosted Monitor Deployment Checklist
 
-在部署前请确保以下所有项目都已完成：
+Use this checklist for the first deployment and for a later recovery. The
+repository root remains the Vercel project root because the Next.js API imports
+the shared scanner from `src/`.
 
-## 📋 Supabase 设置
+## Supabase
 
-- [ ] 创建 Supabase 项目
-- [ ] 执行 `supabase/migration.sql` 创建数据库表
-- [ ] 获取 Project URL
-- [ ] 获取 anon/public key
-- [ ] 获取 service_role key（用于爬虫）
-- [ ] 确认 RLS 策略已启用
+- [ ] Create or select the production Supabase project.
+- [ ] Run `supabase/migration.sql` in the SQL editor.
+- [ ] Confirm these monitor tables exist: `sitemap_sources`, `sitemap_snapshots`,
+      `scan_runs`, `discovered_urls`, `term_occurrences`, and `term_signals`.
+- [ ] Confirm RLS is enabled and policies allow only `service_role` access.
+- [ ] Keep the project URL and service-role key available only for server-side
+      deployments.
 
-## 🌐 Vercel 部署
+## GitHub Actions
 
-- [ ] 代码推送到 GitHub
-- [ ] 在 Vercel 导入项目
-- [ ] 设置环境变量：
-  - [ ] `NEXT_PUBLIC_SUPABASE_URL`
-  - [ ] `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- [ ] 触发首次部署
-- [ ] 验证部署成功（访问域名）
-- [ ] 测试三个页面：Dashboard, Games, Sitemaps
+- [ ] Add repository secrets `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`.
+- [ ] Confirm `.github/workflows/check-sitemaps.yml` is enabled.
+- [ ] Confirm the workflow schedule is `0 */4 * * *` (every four hours UTC).
+- [ ] Use **Run workflow** once to verify the manual path and inspect the JSON
+      scan summary in the job log.
 
-## 🤖 GitHub Actions 设置
+## Vercel
 
-- [ ] 在 GitHub 仓库 Settings → Secrets 添加：
-  - [ ] `SUPABASE_URL`
-  - [ ] `SUPABASE_SERVICE_KEY`
-- [ ] 验证 `.github/workflows/check-sitemaps.yml` 存在
-- [ ] 手动触发一次 Action 测试
-- [ ] 确认 Action 成功运行
+- [ ] Import the repository without changing the project root.
+- [ ] Let `vercel.json` run the root build; it installs the `web` dependencies
+      and builds the Next.js dashboard.
+- [ ] Set these server-side environment variables for Production:
+      `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DASHBOARD_PASSWORD`, and
+      `DASHBOARD_SESSION_SECRET`.
+- [ ] Do not configure `NEXT_PUBLIC_SUPABASE_*` variables. The browser talks to
+      protected Next.js API routes and never receives a Supabase key.
+- [ ] Deploy and confirm `/login` is reachable.
 
-## 🎮 初始化数据
+## First real scan
 
-- [ ] 通过 Web Dashboard 添加第一个 sitemap
-- [ ] 手动触发 GitHub Action 或运行 `npm run check`
-- [ ] 验证游戏数据已写入数据库
-- [ ] 在 Dashboard 查看统计数字更新
-- [ ] 在 Games 页面查看游戏列表
+- [ ] Sign in with the deployment password and open **Sitemaps**.
+- [ ] Add a real game-site Sitemap URL (a Sitemap Index is supported).
+- [ ] Trigger a scan from the source row. The first successful scan creates a
+      baseline and intentionally reports zero new URLs.
+- [ ] Trigger a later scan after the Sitemap changes. Confirm new URLs appear
+      under **Recent discovered URLs** and their final path phrases are shown.
+- [ ] Add a second source on another hostname and verify a repeated phrase is
+      promoted only after a post-baseline discovery on that second site.
+- [ ] Temporarily use an unreachable source or trigger a failing scan, then
+      confirm the source shows `FAILED` while its last successful scan and
+      accepted snapshot remain unchanged.
 
-## 🔍 功能测试
+## Deployment verification
 
-### Dashboard 页面
-- [ ] 统计卡片显示正确数字
-- [ ] 数字计数动画正常
-- [ ] Top 游戏列表显示
-- [ ] 系统状态显示绿色
+From the repository root, run the protected endpoint checks against the deployed
+URL:
 
-### Games 页面
-- [ ] 游戏列表加载正常
-- [ ] 搜索功能工作
-- [ ] 平台数量筛选工作
-- [ ] 域名筛选工作
-- [ ] 游戏卡片悬浮效果
-- [ ] 平台链接可点击
+```bash
+DEPLOYMENT_URL=https://your-dashboard.example \
+  DASHBOARD_PASSWORD='your-password' \
+  node scripts/verify-deployment.js
+```
 
-### Sitemaps 页面
-- [ ] Sitemap 列表显示
-- [ ] 添加新 sitemap 功能
-- [ ] 删除 sitemap 功能
-- [ ] URL 验证工作
+After adding a source, include `VERIFY_SOURCE_ID` to exercise the same manual
+scan endpoint used by the Dashboard:
 
-## 🎨 UI/UX 检查
+```bash
+DEPLOYMENT_URL=https://your-dashboard.example \
+  DASHBOARD_PASSWORD='your-password' \
+  VERIFY_SOURCE_ID=1 \
+  node scripts/verify-deployment.js
+```
 
-- [ ] 霓虹发光效果正常
-- [ ] 动画流畅无卡顿
-- [ ] 移动端响应式正常
-- [ ] 字体加载正常（Rajdhani + JetBrains Mono）
-- [ ] 配色符合赛博朋克风格
-- [ ] 所有按钮悬浮效果正常
-
-## 🔐 安全检查
-
-- [ ] 环境变量不在代码中硬编码
-- [ ] `.env` 文件已加入 `.gitignore`
-- [ ] Supabase RLS 策略正确配置
-- [ ] Service key 只在服务端使用
-- [ ] Anon key 可以公开使用
-
-## 📱 浏览器兼容性
-
-- [ ] Chrome/Edge 测试通过
-- [ ] Firefox 测试通过
-- [ ] Safari 测试通过
-- [ ] 移动端浏览器测试通过
-
-## 🚀 性能优化
-
-- [ ] 图片已优化
-- [ ] 构建产物大小合理
-- [ ] 页面加载速度 < 3秒
-- [ ] Lighthouse 分数 > 80
-
-## 📊 监控设置（可选）
-
-- [ ] 设置 Vercel Analytics
-- [ ] 设置错误监控（Sentry 等）
-- [ ] 设置 Uptime 监控
-
----
-
-## ✨ 部署完成后
-
-1. 将部署域名分享给团队
-2. 添加常用的 sitemap URLs
-3. 观察第一次爬取结果
-4. 根据需要调整 GitHub Actions 执行频率
-
----
-
-## 🆘 遇到问题？
-
-1. 检查浏览器控制台错误
-2. 检查 Vercel 部署日志
-3. 检查 GitHub Actions 日志
-4. 检查 Supabase 日志
-5. 参考 `QUICKSTART.md` 常见问题
-
----
-
-**祝部署顺利！** 🎉
+The verifier checks unauthenticated rejection, password login, the HTTP-only
+session cookie, authenticated source reads, and (when requested) a persisted
+scan result. It does not print the password or service key.

@@ -388,6 +388,15 @@ export class InMemoryMonitorRepository {
     return clone(value);
   }
 
+  async deleteSnapshot(sourceId) {
+    this.snapshots.delete(Number(sourceId));
+  }
+
+  async restoreSnapshot(sourceId, snapshot) {
+    if (snapshot) return this.saveSnapshot(sourceId, snapshot);
+    await this.deleteSnapshot(sourceId);
+  }
+
   async listSnapshots() { return [...this.snapshots.values()].map(clone); }
 
   async startScan(sourceId) {
@@ -569,9 +578,11 @@ export class SitemapMonitor {
     if (!source) throw new Error('Sitemap source not found');
     if (!source.active) throw new Error(`Sitemap source ${source.id} is inactive`);
     const run = await this.repository.startScan(source.id);
+    let previous = null;
+    let snapshotAccepted = false;
     try {
       const current = await fetchSitemapTree(source.url, { fetchImpl: this.fetchImpl, ...this.fetchOptions });
-      const previous = await this.repository.getSnapshot(source.id);
+      previous = await this.repository.getSnapshot(source.id);
       if (previous?.urls?.length && current.urls.length <= previous.urls.length * 0.5) {
         throw new Error(`Suspicious sitemap size decrease: ${current.urls.length} (previously ${previous.urls.length})`);
       }
@@ -579,6 +590,7 @@ export class SitemapMonitor {
       const newUrls = previous ? current.urls.filter((url) => !previousUrls.has(url)) : [];
       const observedAt = this.clock().toISOString();
       if (!previous) {
+        snapshotAccepted = true;
         await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });
         await this.repository.completeScan(run.id, { baselineCreated: true, newUrlCount: 0 });
         return { source: await this.repository.getSource(source.id), run: await this.repository.listRuns(source.id).then((runs) => runs.at(-1)), baselineCreated: true, newUrls: [] };
@@ -591,11 +603,19 @@ export class SitemapMonitor {
         await this.repository.touchDiscoveredUrls(source, current.urls, observedAt);
       }
       // Persist the accepted snapshot only after discovery evidence is durable.
-      // A persistence failure must leave the previous snapshot available for retry.
+      // Any later failure must leave the previous snapshot available for retry.
+      snapshotAccepted = true;
       await this.repository.saveSnapshot(source.id, { urls: current.urls, documents: current.documents, observedAt });
       await this.repository.completeScan(run.id, { baselineCreated: false, newUrlCount: newUrls.length });
       return { source: await this.repository.getSource(source.id), run: await this.repository.listRuns(source.id).then((runs) => runs.at(-1)), baselineCreated: false, newUrls };
     } catch (error) {
+      if (snapshotAccepted) {
+        try {
+          await this.repository.restoreSnapshot(source.id, previous);
+        } catch (restoreError) {
+          error = new Error(`${error.message}; failed to restore accepted snapshot: ${restoreError.message}`, { cause: error });
+        }
+      }
       await this.repository.failScan(run.id, error);
       throw error;
     }

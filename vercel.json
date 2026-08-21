@@ -1,7 +1,7 @@
 {
   "version": 2,
-  "buildCommand": "npm install && npm run build",
-  "outputDirectory": ".next",
-  "installCommand": "npm install",
+  "buildCommand": "npm run build",
+  "outputDirectory": "web/.next",
+  "installCommand": "npm ci && npm --prefix web install --no-package-lock",
   "framework": "nextjs"
 }

@@ -93,6 +93,16 @@ export class SupabaseMonitorRepository {
     return { sourceId: data.source_id, urls: data.urls || [], documents: data.documents || [], observedAt: data.observed_at };
   }
 
+  async deleteSnapshot(sourceId) {
+    const { error } = await this.client.from('sitemap_snapshots').delete().eq('source_id', sourceId);
+    if (error) throw error;
+  }
+
+  async restoreSnapshot(sourceId, snapshot) {
+    if (snapshot) return this.saveSnapshot(sourceId, snapshot);
+    await this.deleteSnapshot(sourceId);
+  }
+
   async startScan(sourceId) {
     const { data, error } = await this.client.from('scan_runs').insert({ source_id: sourceId, status: 'running' }).select('id,source_id,status,started_at,completed_at,error,new_url_count,baseline_created').single();
     if (error) throw error;

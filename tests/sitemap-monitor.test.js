@@ -470,6 +470,34 @@ test('does not advance a snapshot when discovery persistence fails', async () =>
   assert.deepEqual(retry.newUrls, ['https://example.com/two']);
 });
 
+test('restores the last accepted snapshot when scan completion fails', async () => {
+  class FailingCompletionRepository extends InMemoryMonitorRepository {
+    failCompletion = false;
+
+    async completeScan(...args) {
+      if (this.failCompletion) throw new Error('scan completion write failed');
+      return super.completeScan(...args);
+    }
+  }
+
+  const sourceUrl = 'https://example.com/sitemap.xml';
+  const responses = { [sourceUrl]: sitemap(['https://example.com/one']) };
+  const repository = new FailingCompletionRepository();
+  const monitor = new SitemapMonitor({ repository, fetchImpl: fetchFrom(responses) });
+  const source = await monitor.addSource(sourceUrl);
+
+  await monitor.scanSource(source.id);
+  responses[sourceUrl] = sitemap(['https://example.com/one', 'https://example.com/two']);
+  repository.failCompletion = true;
+  await assert.rejects(() => monitor.scanSource(source.id), /scan completion write failed/);
+  assert.deepEqual((await repository.getSnapshot(source.id)).urls, ['https://example.com/one']);
+  assert.equal((await monitor.getSource(source.id)).lastError, 'scan completion write failed');
+
+  repository.failCompletion = false;
+  const retry = await monitor.scanSource(source.id);
+  assert.deepEqual(retry.newUrls, ['https://example.com/two']);
+});
+
 test('deactivation pauses scans and reactivation retains history', async () => {
   const sourceUrl = 'https://example.com/sitemap.xml';
   const repository = new InMemoryMonitorRepository();

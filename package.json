@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "check": "node lib/check-sitemaps.js",
+    "build": "npm --prefix web run build",
+    "verify:deployment": "node scripts/verify-deployment.js",
     "test": "node --test tests/*.test.js && npm --prefix web test",
     "typecheck": "node --check src/services/sitemap-monitor.js && node --check src/services/supabase-monitor-repository.js && node --check lib/check-sitemaps.js && npm --prefix web run typecheck",
     "dev": "vercel dev",

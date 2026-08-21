@@ -1,102 +1,40 @@
-# 🎮 GameMonitor Dashboard
+# Sitemap Monitor Dashboard
 
-A cyberpunk-themed web dashboard for tracking cross-platform games.
+This Next.js app is the protected operator surface for the hosted Sitemap
+monitor. It reads and mutates data only through authenticated server-side API
+routes; it does not create a browser Supabase client.
 
-## ✨ Features
+## Local development
 
-- **Dashboard**: Real-time statistics and top cross-platform games
-- **Games Database**: Browse, search, and filter all tracked games
-- **Sitemap Management**: Add/remove sitemap sources
-- **Cross-Platform Detection**: Automatic game matching across platforms
-- **Scoring System**: Games ranked by platform presence
-
-## 🎨 Design
-
-- Cyberpunk/neon aesthetic with霓虹色调
-- Rajdhani + JetBrains Mono fonts
-- Smooth animations with Framer Motion
-- Fully responsive design
-
-## 🚀 Getting Started
-
-### 1. Install Dependencies
+From the repository root:
 
 ```bash
 npm install
+npm --prefix web install
 ```
 
-### 2. Configure Environment
+Create `web/.env.local` with server-only values:
 
-Copy `.env.example` to `.env.local`:
+```text
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_KEY=your-service-role-key
+DASHBOARD_PASSWORD=choose-a-deployment-password
+DASHBOARD_SESSION_SECRET=use-a-long-random-secret
+```
+
+Then run:
 
 ```bash
-cp .env.example .env.local
+npm --prefix web run dev
 ```
 
-Edit `.env.local` with your Supabase credentials:
+## Production
 
-```env
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
-```
+Deploy from the repository root with the checked-in `vercel.json`. Configure the
+four variables above in Vercel Production. Do not configure
+`NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`: the service key
+must remain in server-side environment variables and all data routes require
+the HTTP-only deployment session.
 
-### 3. Run Development Server
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000)
-
-## 📦 Build for Production
-
-```bash
-npm run build
-npm start
-```
-
-## 🌐 Deploy to Vercel
-
-1. Push code to GitHub
-2. Import project in Vercel
-3. Add environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-4. Deploy!
-
-## 🗂️ Project Structure
-
-```
-web/
-├── src/
-│   ├── components/       # React components
-│   │   ├── Layout.tsx
-│   │   ├── StatCard.tsx
-│   │   └── GameCard.tsx
-│   ├── pages/           # Next.js pages
-│   │   ├── index.tsx    # Dashboard
-│   │   ├── games.tsx    # Games list
-│   │   └── sitemaps.tsx # Sitemap management
-│   ├── lib/             # Utilities
-│   │   └── supabase.ts  # Supabase client
-│   └── styles/          # Global styles
-│       └── globals.css
-├── public/              # Static assets
-├── tailwind.config.js   # Tailwind configuration
-└── package.json
-```
-
-## 🎯 Tech Stack
-
-- **Framework**: Next.js 14
-- **Styling**: TailwindCSS
-- **Animations**: Framer Motion
-- **Database**: Supabase
-- **Language**: TypeScript
-- **Deployment**: Vercel
-
-## 📝 Notes
-
-- Make sure your Supabase database has the correct schema (see `../supabase/schema.sql`)
-- The dashboard uses public read-only access to Supabase
-- For write operations (add/delete sitemaps), ensure RLS policies allow it
+See [`../DEPLOYMENT-CHECKLIST.md`](../DEPLOYMENT-CHECKLIST.md) for Supabase
+migration, GitHub Actions, first-baseline, and verification steps.
